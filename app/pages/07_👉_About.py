@@ -18,7 +18,7 @@ st.markdown(
     """
     This app is built on top of **PyTEM**, an open-source Python package for
     1-D layered-earth Time-Domain Electromagnetic (TEM) forward modelling and inversion.
-    PyTEM is available on GitHub: [github.com/TODO/PyTEM](https://github.com/TODO/PyTEM).
+    PyTEM is available on GitHub: [github.com/pmc93/PyTEM](https://github.com/pmc93/pyTEM).
 
     The core of PyTEM implements:
     - 1-D forward modelling via Wait's upward TE recursion and digital linear filter (DLF) transforms
