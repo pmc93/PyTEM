@@ -2,7 +2,7 @@
 kernels_numba.py - Numba JIT kernels for TEM forward modelling.
 
 Contains:
-  - _te_rte_jit          : Wait recursion (complex), scalar loops
+  - _te_rte_jit          : upward recursion (complex), scalar loops
   - _tem_circular_jit    : central/offset circular loop (Fourier DLF)
   - _tem_square_jit      : square loop via VMD area integral (Fourier DLF)
   - _tem_circular_euler_jit : central/offset (Euler acceleration)
@@ -25,7 +25,7 @@ if HAS_NUMBA:
 
     @nb.njit(**_NB_OPTS)
     def _te_rte_jit(lam, omega, thicknesses, resistivities, mu0):
-        """JIT-compiled TE reflection coefficient (Wait recursion)."""
+        """JIT-compiled TE reflection coefficient (upward recursion)."""
         n_lay = len(resistivities)
         n_lam = len(lam)
         sval = 1j * omega
@@ -37,18 +37,19 @@ if HAS_NUMBA:
             for m in range(n_lam):
                 Gamma[j, m] = np.sqrt(lam[m]**2 + prod)
 
-        r = np.zeros(n_lam, dtype=np.complex128)
-        for j in range(n_lay - 2, -1, -1):
-            h = thicknesses[j]
-            for m in range(n_lam):
-                psi = (Gamma[j, m] - Gamma[j + 1, m]) / (Gamma[j, m] + Gamma[j + 1, m])
-                exp_term = np.exp(-2.0 * Gamma[j, m] * h)
-                r[m] = exp_term * (r[m] + psi) / (1.0 + r[m] * psi)
-
         r_te = np.empty(n_lam, dtype=np.complex128)
         for m in range(n_lam):
-            psi_air = (lam[m] - Gamma[0, m]) / (lam[m] + Gamma[0, m])
-            r_te[m] = (r[m] + psi_air) / (1.0 + r[m] * psi_air)
+            gamma = 0.0 + 0.0j                       # gamma_N = 0 (base half-space)
+            for j in range(n_lay - 1, -1, -1):
+                G_above = (lam[m] + 0.0j) if j == 0 else Gamma[j - 1, m]
+                Gj = Gamma[j, m]
+                psi = (G_above - Gj) / (G_above + Gj)
+                if j < n_lay - 1:
+                    E = np.exp(-2.0 * Gj * thicknesses[j])
+                else:
+                    E = 0.0 + 0.0j
+                gamma = (psi + gamma * E) / (1.0 + psi * gamma * E)
+            r_te[m] = gamma
         return r_te
 
     # ------------------------------------------------------------------
@@ -60,7 +61,7 @@ if HAS_NUMBA:
                           hankel_base, hankel_j1,
                           fourier_base, fourier_weights,
                           filter_weights):
-        """Circular-loop dBz/dt via fused Numba loops (Fourier DLF)."""
+        """Circular-loop dB/dt via fused Numba loops (Fourier DLF)."""
         n_t = len(times)
         n_f = len(fourier_base)
         a = tx_radius
@@ -93,7 +94,7 @@ if HAS_NUMBA:
                         hankel_base, hankel_j0,
                         fourier_base, fourier_weights,
                         filter_weights, altitude=0.0):
-        """Square-loop dBz/dt via VMD area integral (Fourier DLF, Numba).
+        """Square-loop dB/dt via VMD area integral (Fourier DLF, Numba).
 
         altitude : total Tx+Rx elevation [m]; applies an exp(-lam*altitude)
         upward continuation factor per wavenumber (0.0 = on ground).
@@ -148,7 +149,7 @@ if HAS_NUMBA:
                                 hankel_base, hankel_j1,
                                 euler_eta, euler_A,
                                 filter_weights):
-        """Circular-loop dBz/dt via Euler-accelerated Bromwich inversion."""
+        """Circular-loop dB/dt via Euler-accelerated Bromwich inversion."""
         n_t = len(times)
         n_euler = len(euler_eta)
         a = tx_radius
@@ -192,7 +193,7 @@ if HAS_NUMBA:
                               hankel_base, hankel_j0,
                               euler_eta, euler_A,
                               filter_weights, altitude=0.0):
-        """Square-loop dBz/dt via Euler-accelerated Bromwich + VMD integral.
+        """Square-loop dB/dt via Euler-accelerated Bromwich + VMD integral.
 
         altitude : total Tx+Rx elevation [m]; applies an exp(-lam*altitude)
         upward continuation factor per wavenumber (0.0 = on ground).

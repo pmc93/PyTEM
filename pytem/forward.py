@@ -29,6 +29,7 @@ Adding a new geometry
 
 import numpy as np
 from scipy.special import j0, erf
+from collections import OrderedDict
 
 from .transform_weights import MU0, HANKEL_FILTERS, FOURIER_FILTERS, EULER_PARAMS
 from .backends import HAS_CUDA, GPU_HANKEL, GPU_FOURIER
@@ -47,6 +48,24 @@ if HAS_CUDA:
     )
 
 
+_FW_CACHE_MAX = 64
+_FILTER_WEIGHTS_CACHE = OrderedDict()
+_CIRC_GEOM_CACHE = OrderedDict()
+_SQUARE_GEOM_CACHE = OrderedDict()
+
+
+def _arr_cache_key(a):
+    a = np.asarray(a)
+    return (a.shape, a.dtype.str, a.tobytes())
+
+
+def _cache_put(cache, key, value, max_size):
+    cache[key] = value
+    cache.move_to_end(key)
+    if len(cache) > max_size:
+        cache.popitem(last=False)
+
+
 # ============================================================================
 # Helper functions
 # ============================================================================
@@ -55,7 +74,7 @@ def _rx_scale(rx_area=1.0, rx_turns=1):
     """Receiver effective-area scaling factor.
 
     The voltage induced in a multi-turn coil scales with the total effective
-    area N * A (turns times the area of one turn).  The kernels return dBz/dt
+    area N * A (turns times the area of one turn).  The kernels return dB/dt
     per unit effective area, so the final response is multiplied by this factor.
     """
     return float(rx_area) * float(rx_turns)
@@ -226,9 +245,24 @@ def _filter_weights(system_filter, times, transform, f_base, e_eta, e_A):
     """
     if system_filter is None:
         return None
+    key = (
+        None if system_filter is None else id(system_filter),
+        transform,
+        _arr_cache_key(times),
+        None if f_base is None else _arr_cache_key(f_base),
+        None if e_eta is None else _arr_cache_key(e_eta),
+        None if e_A is None else float(e_A),
+    )
+    cached = _FILTER_WEIGHTS_CACHE.get(key)
+    if cached is not None:
+        _FILTER_WEIGHTS_CACHE.move_to_end(key)
+        return cached
     if transform == 'dlf':
-        return _precompute_filter_dlf(system_filter, times, f_base)
-    return _precompute_filter_euler(system_filter, times, e_eta, e_A)
+        fw = _precompute_filter_dlf(system_filter, times, f_base)
+    else:
+        fw = _precompute_filter_euler(system_filter, times, e_eta, e_A)
+    _cache_put(_FILTER_WEIGHTS_CACHE, key, fw, _FW_CACHE_MAX)
+    return fw
 
 
 def _integrate_python(hz_sec, times, signal, transform,
@@ -295,6 +329,12 @@ def _build_circular_geometry(tx_radius, h_base, rx_offset=0.0, altitude=0.0):
     -------
     ndarray, shape (len(h_base),) : the per-wavenumber weights.
     """
+    key = (float(tx_radius), float(rx_offset), float(altitude), _arr_cache_key(h_base))
+    cached = _CIRC_GEOM_CACHE.get(key)
+    if cached is not None:
+        _CIRC_GEOM_CACHE.move_to_end(key)
+        return cached
+
     lam = h_base / float(tx_radius)
     if rx_offset == 0.0:
         weights = np.ones(len(lam), dtype=float)
@@ -302,6 +342,8 @@ def _build_circular_geometry(tx_radius, h_base, rx_offset=0.0, altitude=0.0):
         weights = j0(lam * float(rx_offset))
     if altitude != 0.0:
         weights = weights * np.exp(-lam * float(altitude))
+
+    _cache_put(_CIRC_GEOM_CACHE, key, weights, _FW_CACHE_MAX)
     return weights
 
 
@@ -341,6 +383,12 @@ def _build_square_geometry(tx_side, n_quad, rx_x=0.0, rx_y=0.0,
         dist_q : horizontal source-to-receiver distance at each node [m]
         area_w : Gauss-Legendre area weight at each node
     """
+    key = (float(tx_side), int(n_quad), float(rx_x), float(rx_y), bool(use_symmetry))
+    cached = _SQUARE_GEOM_CACHE.get(key)
+    if cached is not None:
+        _SQUARE_GEOM_CACHE.move_to_end(key)
+        return cached
+
     L = float(tx_side)
     hs = L / 2.0
     gl_nodes, gl_weights = np.polynomial.legendre.leggauss(n_quad)
@@ -354,15 +402,35 @@ def _build_square_geometry(tx_side, n_quad, rx_x=0.0, rx_y=0.0,
                 w = w_pts[i] * w_pts[jj] * (2.0 if i != jj else 1.0)
                 dist_q.append(np.sqrt(x_pts[i]**2 + x_pts[jj]**2))
                 area_w.append(w)
-        return np.asarray(dist_q, dtype=float), np.asarray(area_w, dtype=float)
+        out = np.asarray(dist_q, dtype=float), np.asarray(area_w, dtype=float)
+        _cache_put(_SQUARE_GEOM_CACHE, key, out, _FW_CACHE_MAX)
+        return out
     else:
         x_pts = hs * gl_nodes
         wx = hs * gl_weights
+        if rx_y == 0.0:
+            # Rx on the x-axis: the loop is mirror-symmetric about y=0, so a
+            # source at (x_i, +y_j) and its mirror (x_i, -y_j) are equidistant
+            # from the receiver. The GL nodes/weights are symmetric about 0, so
+            # we keep only y_j >= 0 and double the off-axis weights. This halves
+            # the number of point sources with no change in the result.
+            keep = gl_nodes >= 0.0
+            y_pts = hs * gl_nodes[keep]
+            wy = hs * gl_weights[keep] * np.where(gl_nodes[keep] > 0.0, 2.0, 1.0)
+            xx, yy = np.meshgrid(x_pts, y_pts, indexing='xy')
+            ww_x, ww_y = np.meshgrid(wx, wy, indexing='xy')
+            dist_q = np.sqrt((xx.ravel() - rx_x)**2 + yy.ravel()**2)
+            dist_q = np.maximum(dist_q, 1e-6)
+            out = dist_q, (ww_x * ww_y).ravel()
+            _cache_put(_SQUARE_GEOM_CACHE, key, out, _FW_CACHE_MAX)
+            return out
         xx, yy = np.meshgrid(x_pts, x_pts, indexing='xy')
         ww_x, ww_y = np.meshgrid(wx, wx, indexing='xy')
         dist_q = np.sqrt((xx.ravel() - rx_x)**2 + (yy.ravel() - rx_y)**2)
         dist_q = np.maximum(dist_q, 1e-6)
-        return dist_q, (ww_x * ww_y).ravel()
+        out = dist_q, (ww_x * ww_y).ravel()
+        _cache_put(_SQUARE_GEOM_CACHE, key, out, _FW_CACHE_MAX)
+        return out
 
 
 # ============================================================================
@@ -502,7 +570,7 @@ def fwd_circle_central(thicknesses, resistivities, tx_radius, times,
     """
     Central-loop TEM forward response for a 1-D layered earth.
 
-    Computes dBz/dt [V/m^2] at the centre of a circular Tx loop.
+    Computes dB/dt [V/m^2] at the centre of a circular Tx loop.
     Backends tried in order: CUDA > Numba > pure Python.
     The pure Python path also supports the impulse response (signal=0).
 
@@ -533,7 +601,7 @@ def fwd_circle_central(thicknesses, resistivities, tx_radius, times,
 
     Returns
     -------
-    dbdt : ndarray, shape (n_t,)  dBz/dt [V/m^2]
+    dbdt : ndarray, shape (n_t,)  dB/dt [V/m^2]
     """
     thicknesses = np.asarray(thicknesses, dtype=float)
     resistivities = np.asarray(resistivities, dtype=float)
@@ -567,7 +635,7 @@ def fwd_circle_offset(thicknesses, resistivities, tx_radius, rx_offset,
     """
     Offset-loop TEM forward response for a 1-D layered earth.
 
-    Computes dBz/dt [V/m^2] at a receiver displaced by rx_offset [m]
+    Computes dB/dt [V/m^2] at a receiver displaced by rx_offset [m]
     from the centre of a circular Tx loop.
 
     Parameters
@@ -726,7 +794,7 @@ def fwd_square_offset(thicknesses, resistivities, tx_side,
 # ============================================================================
 
 def fwd_analytical_central(resistivity, tx_radius, times, current=1.0):
-    """Analytical central-loop dBz/dt over a homogeneous half-space.
+    """Analytical central-loop dB/dt over a homogeneous half-space.
 
     Closed-form reference solution (Ward & Hohmann, 1988, eq 4.69a) for the
     vertical field decay at the centre of a circular loop on a uniform earth.
@@ -741,7 +809,7 @@ def fwd_analytical_central(resistivity, tx_radius, times, current=1.0):
 
     Returns
     -------
-    dbdt : ndarray, shape (n_t,)  dBz/dt [V/m^2]
+    dbdt : ndarray, shape (n_t,)  dB/dt [V/m^2]
     """
     times = np.asarray(times, dtype=float)
     sigma = 1.0 / resistivity
@@ -759,7 +827,7 @@ def fwd_analytical_central(resistivity, tx_radius, times, current=1.0):
 
 def fwd_analytical_offset(resistivity, tx_radius, rx_offset, times,
                                    current=1.0):
-    """Analytical offset dBz/dt over a homogeneous half-space (far field).
+    """Analytical offset dB/dt over a homogeneous half-space (far field).
 
     Closed-form reference solution (Ward & Hohmann, 1988, eq 4.97, differen-
     tiated with respect to time) for the vertical field at a radial offset from
@@ -777,7 +845,7 @@ def fwd_analytical_offset(resistivity, tx_radius, rx_offset, times,
 
     Returns
     -------
-    dbdt : ndarray, shape (n_t,)  dBz/dt [V/m^2]
+    dbdt : ndarray, shape (n_t,)  dB/dt [V/m^2]
     """
     times = np.asarray(times, dtype=float)
     sigma = 1.0 / resistivity

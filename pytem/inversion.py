@@ -14,6 +14,7 @@ Contains:
 """
 
 import time as _time_mod
+from collections import OrderedDict
 
 import numpy as np
 
@@ -40,6 +41,158 @@ if HAS_CUDA:
     )
 
 
+_JANA_CONTEXT_CACHE = OrderedDict()
+_JANA_CONTEXT_CACHE_MAX = 32
+
+
+def _arr_cache_key(a):
+    a = np.asarray(a)
+    return (a.shape, a.dtype.str, a.tobytes())
+
+
+def _cache_put(cache, key, value, max_size):
+    cache[key] = value
+    cache.move_to_end(key)
+    if len(cache) > max_size:
+        cache.popitem(last=False)
+
+
+def _get_jana_context(thicknesses, times, tx_size,
+                      geometry, rx_x, rx_y, n_quad, use_symmetry,
+                      transform, hankel_filter, fourier_filter, euler_order,
+                      tx_height, rx_height, system_filter):
+    """Build or fetch model-independent analytical-Jacobian context.
+
+    This caches geometry/filter setup that does not depend on resistivity,
+    which is reused across inversion iterations and benchmark repeats.
+    """
+    times = np.asarray(times, dtype=float)
+    thicknesses = np.asarray(thicknesses, dtype=float)
+    altitude = float(tx_height) + float(rx_height)
+    a = float(tx_size)
+
+    key = (
+        _arr_cache_key(thicknesses),
+        _arr_cache_key(times),
+        a, geometry, float(rx_x), float(rx_y), int(n_quad), bool(use_symmetry),
+        transform, hankel_filter, fourier_filter, int(euler_order),
+        float(tx_height), float(rx_height),
+        None if system_filter is None else id(system_filter),
+    )
+
+    cached = _JANA_CONTEXT_CACHE.get(key)
+    if cached is not None:
+        _JANA_CONTEXT_CACHE.move_to_end(key)
+        return cached
+
+    h_base, h_j0, h_j1 = HANKEL_FILTERS[hankel_filter]
+    _use_euler = (transform == 'euler')
+    e_eta = e_A = f_base = f_sin = None
+    if _use_euler:
+        e_eta, e_A = EULER_PARAMS[euler_order]
+    else:
+        f_base, f_sin, _ = FOURIER_FILTERS[fourier_filter]
+
+    _is_circle = geometry in ('circle_central', 'circle_offset')
+    lam = lam_kern = dist_q = area_w = quad_scale = None
+
+    if geometry == 'circle_central':
+        lam = h_base / a
+        lam_kern = lam * h_j1
+    elif geometry == 'circle_offset':
+        from scipy.special import j0 as _j0
+
+        lam = h_base / a
+        lam_kern = lam * _j0(lam * float(rx_x)) * h_j1
+    elif geometry == 'square_central':
+        side = a
+        hs = side / 2.0
+        gl_nodes, gl_weights = np.polynomial.legendre.leggauss(n_quad)
+        x_pts = hs / 2.0 * (1.0 + gl_nodes)
+        w_pts = gl_weights * hs / 2.0
+        if use_symmetry:
+            dist_q_l, area_w_l = [], []
+            for _i in range(n_quad):
+                for _jj in range(_i, n_quad):
+                    w = w_pts[_i] * w_pts[_jj]
+                    if _i != _jj:
+                        w *= 2.0
+                    dist_q_l.append(np.sqrt(x_pts[_i] ** 2 + x_pts[_jj] ** 2))
+                    area_w_l.append(w)
+            dist_q = np.array(dist_q_l)
+            area_w = np.array(area_w_l)
+        else:
+            _xx, _yy = np.meshgrid(x_pts, x_pts)
+            _wx, _wy = np.meshgrid(w_pts, w_pts)
+            dist_q = np.sqrt(_xx.ravel() ** 2 + _yy.ravel() ** 2)
+            area_w = (_wx * _wy).ravel()
+        quad_scale = 4.0
+    elif geometry == 'square_offset':
+        side = a
+        hs = side / 2.0
+        gl_nodes, gl_weights = np.polynomial.legendre.leggauss(n_quad)
+        x_pts = hs * gl_nodes
+        wx = hs * gl_weights
+        if float(rx_y) == 0.0:
+            keep = gl_nodes >= 0.0
+            y_pts = hs * gl_nodes[keep]
+            wy = hs * gl_weights[keep] * np.where(gl_nodes[keep] > 0.0, 2.0, 1.0)
+            _xx, _yy = np.meshgrid(x_pts, y_pts, indexing='xy')
+            _wx, _wy = np.meshgrid(wx, wy, indexing='xy')
+            dist_q = np.sqrt((_xx.ravel() - float(rx_x)) ** 2 + _yy.ravel() ** 2)
+        else:
+            _xx, _yy = np.meshgrid(x_pts, x_pts, indexing='xy')
+            _wx, _wy = np.meshgrid(wx, wx, indexing='xy')
+            dist_q = np.sqrt((_xx.ravel() - float(rx_x)) ** 2 + (_yy.ravel() - float(rx_y)) ** 2)
+        dist_q = np.maximum(dist_q, 1e-6)
+        area_w = (_wx * _wy).ravel()
+        quad_scale = 1.0
+    else:
+        raise ValueError(
+            f"Unknown geometry '{geometry}'. Choose from: "
+            "'circle_central', 'circle_offset', 'square_central', 'square_offset'."
+        )
+
+    if _is_circle and altitude != 0.0:
+        lam_kern = lam_kern * np.exp(-lam * altitude)
+
+    if _use_euler:
+        n_eval = len(e_eta)
+        filter_weights = (
+            _precompute_filter_euler(system_filter, times, e_eta, e_A)
+            if system_filter is not None
+            else np.ones((len(times), n_eval), dtype=np.complex128)
+        )
+    else:
+        n_f = len(f_base)
+        filter_weights = (
+            _precompute_filter_dlf(system_filter, times, f_base)
+            if system_filter is not None
+            else np.ones((len(times), n_f), dtype=np.complex128)
+        )
+
+    ctx = {
+        'h_base': h_base,
+        'h_j0': h_j0,
+        'h_j1': h_j1,
+        '_use_euler': _use_euler,
+        'e_eta': e_eta,
+        'e_A': e_A,
+        'f_base': f_base,
+        'f_sin': f_sin,
+        '_is_circle': _is_circle,
+        'lam': lam,
+        'lam_kern': lam_kern,
+        'dist_q': dist_q,
+        'area_w': area_w,
+        'quad_scale': quad_scale,
+        'filter_weights': filter_weights,
+        'altitude': altitude,
+    }
+    _cache_put(_JANA_CONTEXT_CACHE, key, ctx, _JANA_CONTEXT_CACHE_MAX)
+    return ctx
+
+
 # ============================================================
 # NumPy / CuPy batch function (array-level, xp-agnostic)
 # ============================================================
@@ -60,40 +213,43 @@ def _te_grad_batch(lam, omegas, thick, rho, xp):
     Gamma = xp.sqrt(lam2[None, None, :] + sval[None, :, None] * MU0 * sigma[:, None, None])
     dG = -sval[None, :, None] * MU0 * sigma[:, None, None] / (2.0 * Gamma)
 
-    r = xp.zeros((M, K), dtype=xp.complex128)
-    r_st = xp.empty((n_lay, M, K), dtype=xp.complex128)
-    e_st = xp.empty((n_lay - 1, M, K), dtype=xp.complex128)
-    r_st[n_lay - 1] = 0.0
+    # Upward recursion (paper Eq. 2), batched over M frequencies. gamma_N = 0
+    # and gamma_j = (psi_j + gamma_{j+1} E_{j+1}) / (1 + psi_j gamma_{j+1} E_{j+1}).
+    psi_st = xp.empty((n_lay, M, K), dtype=xp.complex128)
+    e_st = xp.empty((n_lay, M, K), dtype=xp.complex128)
+    gb_st = xp.empty((n_lay, M, K), dtype=xp.complex128)
 
-    for j in range(n_lay - 2, -1, -1):
-        ej = xp.exp(-2.0 * Gamma[j] * thick_f[j])
-        e_st[j] = ej
-        ps = (Gamma[j] - Gamma[j+1]) / (Gamma[j] + Gamma[j+1])
-        r = ej * (r + ps) / (1.0 + r * ps)
-        r_st[j] = r
+    gamma = xp.zeros((M, K), dtype=xp.complex128)          # gamma_N = 0
+    for j in range(n_lay - 1, -1, -1):
+        G_above = lam[None, :] if j == 0 else Gamma[j - 1]
+        Gj = Gamma[j]
+        ps = (G_above - Gj) / (G_above + Gj)
+        E = (xp.exp(-2.0 * Gj * thick_f[j]) if j < n_lay - 1
+             else xp.zeros((M, K), dtype=xp.complex128))
+        gb_st[j] = gamma
+        psi_st[j] = ps
+        e_st[j] = E
+        gamma = (ps + gamma * E) / (1.0 + ps * gamma * E)
+    r_TE = gamma
 
-    pa = (lam[None, :] - Gamma[0]) / (lam[None, :] + Gamma[0])
-    da = 1.0 + r_st[0] * pa
-    r_TE = (r_st[0] + pa) / da
-
-    adj = (1.0 - pa ** 2) / da ** 2
-    dpg0 = -2.0 * lam[None, :] / (lam[None, :] + Gamma[0]) ** 2
-    drpa = (1.0 - r_st[0] ** 2) / da ** 2
-
+    # Adjoint backward pass; dr accumulates d r_TE / d Gamma_j (scaled by dG at end).
     dr = xp.zeros((n_lay, M, K), dtype=xp.complex128)
-    dr[0] += drpa * dpg0 * dG[0]
+    ladj = xp.ones((M, K), dtype=xp.complex128)            # d r_TE / d gamma_0
+    for j in range(n_lay):
+        G_above = lam[None, :] if j == 0 else Gamma[j - 1]
+        Gj = Gamma[j]
+        ps = psi_st[j]; E = e_st[j]; g = gb_st[j]
+        den2 = (1.0 + ps * g * E) ** 2
+        dg_dpsi = (1.0 - (g * E) ** 2) / den2
+        dg_dE = g * (1.0 - ps ** 2) / den2
+        dg_dgb = E * (1.0 - ps ** 2) / den2
+        dE_dGj = (-2.0 * thick_f[j] * E) if j < n_lay - 1 else 0.0
+        dr[j] += ladj * (dg_dpsi * (-2.0 * G_above / (G_above + Gj) ** 2) + dg_dE * dE_dGj)
+        if j >= 1:
+            dr[j - 1] += ladj * dg_dpsi * (2.0 * Gj / (G_above + Gj) ** 2)
+        ladj = ladj * dg_dgb
 
-    for j in range(n_lay - 1):
-        rb = r_st[j+1]; ej = e_st[j]
-        gs = Gamma[j] + Gamma[j+1]
-        ps = (Gamma[j] - Gamma[j+1]) / gs
-        den = 1.0 + rb * ps; num = rb + ps
-        drps = ej * (1.0 - rb**2) / den**2
-        dej = -2.0 * thick_f[j] * ej
-        dr[j]   += adj * (dej * num / den + drps * 2.0 * Gamma[j+1] / gs**2) * dG[j]
-        dr[j+1] += adj * drps * (-2.0 * Gamma[j] / gs**2) * dG[j+1]
-        adj = adj * ej * (1.0 - ps**2) / den**2
-
+    dr *= dG
     return r_TE, dr
 
 # ============================================================
@@ -111,11 +267,16 @@ def getJ_ana(thicknesses, log_resistivities, tx_size, times,
              system_filter=None,
              tx_height=0.0, rx_height=0.0,
              transform='dlf', hankel_filter='key_101',
-             fourier_filter='key_81', euler_order=11):
+             fourier_filter='key_81', euler_order=11,
+             jacobian_mode='log'):
+
     """Analytical Jacobian  d(ln(-dBdt_i)) / d(ln rho_j)  for all loop geometries.
 
-    Uses the adjoint Wait recursion: a single forward+backward pass per
+    Uses the adjoint upward recursion: a single forward+backward pass per
     quadrature frequency yields gradients for all N layers simultaneously.
+    This avoids one separate forward solve per layer, but the runtime still
+    grows with N because the recursion and the returned Jacobian both carry
+    one sensitivity value per layer.
 
     Transform modes
     ---------------
@@ -133,7 +294,7 @@ def getJ_ana(thicknesses, log_resistivities, tx_size, times,
     Backend strategy
     ----------------
     NumPy   : All n_f frequencies batched into a single _te_grad_batch call
-              per gate time so the inner Wait recursion runs in NumPy's C
+              per gate time so the inner upward recursion runs in NumPy's C
               layer.  A Python for-loop over frequencies would add n_f
               function-call overheads; batching eliminates them entirely.
     Numba   : Scalar loops compiled to SIMD machine code via JIT; prange
@@ -172,105 +333,55 @@ def getJ_ana(thicknesses, log_resistivities, tx_size, times,
     hankel_filter     : str   (default 'key_101')
     fourier_filter    : str   (default 'key_81') - DLF only
     euler_order       : int   8, 11, 15, or 19 (default 11) - Euler only
+    jacobian_mode     : str
+        'log'      -> return d(ln(-dBdt))/d(ln rho) (default, legacy behavior)
+        'absolute' -> return d(-dBdt)/d(ln rho)
 
     Returns
     -------
     J : (n_t, N) float64
     """
-    from scipy.special import j0 as _j0
-
     thicknesses   = np.asarray(thicknesses, dtype=float)
     resistivities = np.exp(np.asarray(log_resistivities, dtype=float))
     times         = np.asarray(times, dtype=float)
-    a             = float(tx_size)
     n_lay         = len(resistivities)
     n_t           = len(times)
-    altitude      = float(tx_height) + float(rx_height)
+    ctx = _get_jana_context(
+        thicknesses=thicknesses,
+        times=times,
+        tx_size=tx_size,
+        geometry=geometry,
+        rx_x=rx_x,
+        rx_y=rx_y,
+        n_quad=n_quad,
+        use_symmetry=use_symmetry,
+        transform=transform,
+        hankel_filter=hankel_filter,
+        fourier_filter=fourier_filter,
+        euler_order=euler_order,
+        tx_height=tx_height,
+        rx_height=rx_height,
+        system_filter=system_filter,
+    )
 
-    h_base, h_j0, h_j1 = HANKEL_FILTERS[hankel_filter]
-    _use_euler = (transform == 'euler')
+    h_base = ctx['h_base']
+    h_j0 = ctx['h_j0']
+    _use_euler = ctx['_use_euler']
+    e_eta = ctx['e_eta']
+    e_A = ctx['e_A']
+    f_base = ctx['f_base']
+    f_sin = ctx['f_sin']
+    _is_circle = ctx['_is_circle']
+    lam = ctx['lam']
+    lam_kern = ctx['lam_kern']
+    dist_q = ctx['dist_q']
+    area_w = ctx['area_w']
+    quad_scale = ctx['quad_scale']
+    filter_weights = ctx['filter_weights']
+    altitude = ctx['altitude']
 
-    if _use_euler:
-        e_eta, e_A = EULER_PARAMS[euler_order]
-    else:
-        f_base, f_sin, _ = FOURIER_FILTERS[fourier_filter]
-
-    # ---- Geometry-specific pre-computation ----
-    _is_circle = geometry in ('circle_central', 'circle_offset')
-
-    if geometry == 'circle_central':
-        lam      = h_base / a
-        lam_kern = lam * h_j1
-
-    elif geometry == 'circle_offset':
-        lam      = h_base / a
-        j0_vals  = _j0(lam * float(rx_x))
-        lam_kern = lam * j0_vals * h_j1
-
-    elif geometry == 'square_central':
-        side  = a
-        hs    = side / 2.0
-        gl_nodes, gl_weights = np.polynomial.legendre.leggauss(n_quad)
-        x_pts = hs / 2.0 * (1.0 + gl_nodes)
-        w_pts = gl_weights * hs / 2.0
-        if use_symmetry:
-            dist_q_l, area_w_l = [], []
-            for _i in range(n_quad):
-                for _jj in range(_i, n_quad):
-                    w = w_pts[_i] * w_pts[_jj]
-                    if _i != _jj:
-                        w *= 2.0
-                    dist_q_l.append(np.sqrt(x_pts[_i]**2 + x_pts[_jj]**2))
-                    area_w_l.append(w)
-            dist_q  = np.array(dist_q_l)
-            area_w = np.array(area_w_l)
-        else:
-            _xx, _yy = np.meshgrid(x_pts, x_pts)
-            _wx, _wy = np.meshgrid(w_pts, w_pts)
-            dist_q  = np.sqrt(_xx.ravel()**2 + _yy.ravel()**2)
-            area_w = (_wx * _wy).ravel()
-        quad_scale = 4.0
-
-    elif geometry == 'square_offset':
-        side  = a
-        hs    = side / 2.0
-        gl_nodes, gl_weights = np.polynomial.legendre.leggauss(n_quad)
-        x_pts = hs * gl_nodes
-        wx    = hs * gl_weights
-        _xx, _yy = np.meshgrid(x_pts, x_pts, indexing='xy')
-        _wx, _wy = np.meshgrid(wx, wx, indexing='xy')
-        dist_q  = np.sqrt((_xx.ravel() - float(rx_x))**2 +
-                         (_yy.ravel() - float(rx_y))**2)
-        dist_q  = np.maximum(dist_q, 1e-6)
-        area_w = (_wx * _wy).ravel()
-        quad_scale = 1.0
-
-    else:
-        raise ValueError(
-            f"Unknown geometry '{geometry}'. Choose from: "
-            "'circle_central', 'circle_offset', 'square_central', 'square_offset'.")
-
-    # Elevated Tx/Rx: in air (sigma=0) the vertical wavenumber equals lam, so an
-    # elevation of (tx_height + rx_height) multiplies each integrand by
-    # exp(-lam * altitude).  This factor is model-independent, so it folds into
-    # the precomputed circular kernel weights identically for the gradient.
-    if _is_circle and altitude != 0.0:
-        lam_kern = lam_kern * np.exp(-lam * altitude)
-
-    # ---- Pre-evaluate system filter at all transform frequencies ----
-    # When system_filter is None, ones are used (no effect on the integrals).
-    # For DLF:   filter_weights[i, k] = H(f_base[k] / times[i]),  shape (n_t, n_f).
-    # For Euler: filter_weights[i, k] = H(omega_k(times[i])),      shape (n_t, n_eval).
-    if _use_euler:
-        n_eval = len(e_eta)
-        filter_weights = (_precompute_filter_euler(system_filter, times, e_eta, e_A)
-                          if system_filter is not None
-                          else np.ones((n_t, n_eval), dtype=np.complex128))
-    else:
-        n_f = len(f_base)
-        filter_weights = (_precompute_filter_dlf(system_filter, times, f_base)
-                          if system_filter is not None
-                          else np.ones((n_t, n_f), dtype=np.complex128))
+    # Circle Tx radius (used by the GPU circle kernels, which recompute lam = h_base / a).
+    a = float(tx_size)
 
     # ---- Backend dispatch: CUDA > Numba > NumPy ----
     _use_nb  = HAS_NUMBA and use_numba
@@ -407,10 +518,20 @@ def getJ_ana(thicknesses, log_resistivities, tx_size, times,
         dbdt  *= scale
         J_raw *= scale
 
+    if jacobian_mode == 'absolute':
+        # If response is r = -dBdt, and J_raw = d(dBdt)/d(ln rho),
+        # then dr/d(ln rho) = -J_raw.
+        J_abs = -J_raw
+        np.nan_to_num(J_abs, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        return J_abs
+
+    if jacobian_mode != 'log':
+        raise ValueError("jacobian_mode must be 'log' or 'absolute'")
+
     f0 = -dbdt
     if np.any(f0 <= 0):
         print(f"WARNING: {(f0 <= 0).sum()} non-positive dbdt values (zeroed in J)")
-    J     = np.zeros((n_t, n_lay))
+    J = np.zeros((n_t, n_lay))
     valid = f0 > 0
     J[valid, :] = -J_raw[valid, :] / f0[valid, None]
     np.nan_to_num(J, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
@@ -491,11 +612,28 @@ def getR(resistivities, damp=1e-4):
 
 
 def getJ_fd(thicknesses, log_resistivities, tx_size, times,
-            use_numba=False, use_cuda=True, eps=1e-4, fwd=fwd_circle_central,
+            use_numba=False, use_cuda=True, eps=None, fwd=fwd_circle_central,
             tx_height=0.0, rx_height=0.0,
             transform='dlf', hankel_filter='key_101', fourier_filter='key_81',
             euler_order=11):
-    """Finite-difference Jacobian d(log(-dBdt))/d(ln rho)."""
+    """Finite-difference Jacobian d(log(-dBdt))/d(ln rho).
+
+    Note: the Euler transform forward is only ~8-digit accurate, so finite
+    differencing it amplifies round-off into large relative errors. For the
+    'euler' transform prefer the analytical Jacobian ``getJ_ana`` (or use
+    ``transform='dlf'``). When ``eps`` is left unset it defaults to 1e-4 for
+    'dlf' and a larger 1e-2 for 'euler' to reduce that amplification.
+    """
+    if eps is None:
+        eps = 1e-2 if transform == 'euler' else 1e-4
+        if transform == 'euler':
+            print("WARNING: FD Jacobian on the Euler transform is unreliable "
+                  "(round-off amplification); using eps=1e-2. Prefer getJ_ana "
+                  "or transform='dlf' for accurate sensitivities.")
+    elif transform == 'euler':
+        print("WARNING: FD Jacobian on the Euler transform is unreliable "
+              "(round-off amplification). Prefer getJ_ana or transform='dlf'.")
+
     fwd_kw = dict(use_numba=use_numba, use_cuda=use_cuda, transform=transform,
                   tx_height=tx_height, rx_height=rx_height,
                   hankel_filter=hankel_filter, fourier_filter=fourier_filter,
@@ -757,7 +895,7 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
 
     Parameters
     ----------
-    obs_data            : (n_t,) observed dBz/dt [T/s], positive values
+    obs_data            : (n_t,) observed dB/dt [T/s], positive values
     thicknesses         : (N,)   layer thicknesses [m]
     log_resistivities   : (N,)   initial ln(rho) [ln(Ohm.m)]
     tx_size             : float  Tx loop dimension [m]: radius for circle
@@ -812,6 +950,24 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
     thicknesses = np.asarray(thicknesses,       dtype=float)
     m           = np.asarray(log_resistivities, dtype=float).copy()
     times       = np.asarray(times,             dtype=float)
+
+    # ---- Backend/use-path logging ----
+    fwd_backend = 'cuda' if (HAS_CUDA and use_cuda) else ('numba' if (HAS_NUMBA and use_numba) else 'numpy')
+    if analytical_j:
+        if HAS_NUMBA and use_numba:
+            jac_backend = 'numba'
+        elif HAS_CUDA and use_cuda:
+            jac_backend = 'cuda'
+        else:
+            jac_backend = 'numpy'
+    else:
+        jac_backend = 'finite_difference'
+    print(
+        '[invert] '
+        f'geometry={geometry}, transform={transform}, '
+        f'fwd_backend={fwd_backend}, jac_backend={jac_backend}, '
+        f'analytical_j={analytical_j}, waveform={waveform_times is not None and waveform_currents is not None}'
+    )
 
     # ---- Circle warm-start ----
     if circle_warmstart and geometry.startswith('square'):

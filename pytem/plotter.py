@@ -126,7 +126,7 @@ def plot_inversion(times, obs_data, mod_data, thicknesses,
     # --- Model ---
     ax = axs[2]
     thicknesses = np.asarray(thicknesses)
-    depths = np.concatenate(([0], np.cumsum(thicknesses[:-1])))
+    depths = np.concatenate(([0], np.cumsum(thicknesses)))
     y_end = depths[-1] + depth_pad
 
     if rho_hist is not None:

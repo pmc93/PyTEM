@@ -9,9 +9,9 @@ import re
 import streamlit as st
 
 # --- Edit these once; they propagate to every page footer --------------------
-APP_AUTHORS = "the PyTEM authors"
+APP_AUTHORS = " "
 APP_LICENSE = "see repository LICENSE"   # TODO: set once a license is chosen
-APP_REPO_URL = "https://github.com/TODO/pyTEM"
+#APP_REPO_URL = "https://github.com/pmc93/pyTEM"
 
 _MOBILE_UA = re.compile(
     r"Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile",
@@ -37,9 +37,9 @@ def render_footer():
     """Render a consistent license / author footer at the bottom of a page."""
     st.divider()
     st.caption(
-        f"**PyTEM**   ·  "
+        f" "
         f"© {datetime.date.today().year} {APP_AUTHORS}  ·  "
         f"License: {APP_LICENSE}  ·  "
-        f"[Source]({APP_REPO_URL})  \n"
+        #f"[Source]({APP_REPO_URL})  \n"
         "For teaching and research purposes. Synthetic examples are illustrative, not field surveys."
     )

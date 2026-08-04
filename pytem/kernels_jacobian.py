@@ -1,7 +1,7 @@
 """
 kernels_jacobian.py - Numba JIT and CuPy GPU kernels for the analytical Jacobian.
 
-Implements the adjoint Wait recursion: a single forward+backward pass per
+Implements the adjoint upward recursion: a single forward+backward pass per
 (omega, lambda) point yields d(r_TE)/d(ln rho_j) for all N layers at once.
 
 Backend rationale
@@ -64,7 +64,7 @@ if HAS_NUMBA:
 
     @nb.njit(**_NB_OPTS)
     def _te_rte_grad_jit(lam, omega, thicknesses, resistivities, mu0):
-        """Wait recursion + adjoint gradient - single omega, scalar loops (Numba JIT).
+        """Upward recursion + adjoint gradient - single omega, scalar loops (Numba JIT).
 
         Returns r_te (K,) and dr_te (N, K) = d(r_TE)/d(ln rho_j) for all layers.
         Handles both real (DLF) and complex (Euler) omega natively.
@@ -83,55 +83,49 @@ if HAS_NUMBA:
                 Gamma[j, m]  = g
                 dGamma[j, m] = -prod / (2.0 * g)
 
-        r_store   = np.zeros((n_lay, n_lam), dtype=np.complex128)
-        exp_store = np.zeros((n_lay - 1, n_lam), dtype=np.complex128)
-        r = np.zeros(n_lam, dtype=np.complex128)
-        r_store[n_lay - 1] = r
-
-        for j in range(n_lay - 2, -1, -1):
-            h     = thicknesses[j]
-            r_new = np.empty(n_lam, dtype=np.complex128)
-            for m in range(n_lam):
-                ej              = np.exp(-2.0 * Gamma[j, m] * h)
-                exp_store[j, m] = ej
-                psi             = (Gamma[j, m] - Gamma[j+1, m]) / (Gamma[j, m] + Gamma[j+1, m])
-                r_new[m]        = ej * (r[m] + psi) / (1.0 + r[m] * psi)
-            r = r_new
-            r_store[j] = r
-
-        r_te    = np.empty(n_lam, dtype=np.complex128)
-        psi_air = np.empty(n_lam, dtype=np.complex128)
-        for m in range(n_lam):
-            pa         = (lam[m] - Gamma[0, m]) / (lam[m] + Gamma[0, m])
-            psi_air[m] = pa
-            r_te[m]    = (r_store[0, m] + pa) / (1.0 + r_store[0, m] * pa)
-
+        r_te  = np.empty(n_lam, dtype=np.complex128)
         dr_te = np.zeros((n_lay, n_lam), dtype=np.complex128)
-        adj   = np.empty(n_lam, dtype=np.complex128)
-        for m in range(n_lam):
-            pa        = psi_air[m]
-            r0        = r_store[0, m]
-            d_air     = 1.0 + r0 * pa
-            adj[m]    = (1.0 - pa**2)  / d_air**2
-            dpsi_dphi = (1.0 - r0**2)  / d_air**2
-            dpsi_dG0  = -2.0 * lam[m] / (lam[m] + Gamma[0, m])**2
-            dr_te[0, m] += dpsi_dphi * dpsi_dG0 * dGamma[0, m]
 
-        for j in range(n_lay - 1):
-            for m in range(n_lam):
-                rb   = r_store[j+1, m];  ej   = exp_store[j, m]
-                Gj   = Gamma[j, m];      Gjp1 = Gamma[j+1, m]
-                sG   = Gj + Gjp1;        psi  = (Gj - Gjp1) / sG
-                num  = rb + psi;         den  = 1.0 + rb * psi
-                dpsi_dGj   =  2.0 * Gjp1 / sG**2
-                dpsi_dGjp1 = -2.0 * Gj   / sG**2
-                dr_dpsi    = ej * (1.0 - rb**2) / den**2
-                dr_dGj     = (-2.0 * thicknesses[j] * ej) * num / den + dr_dpsi * dpsi_dGj
-                dr_dGjp1   = dr_dpsi * dpsi_dGjp1
-                dr_drbelow = ej * (1.0 - psi**2) / den**2
-                dr_te[j,   m] += adj[m] * dr_dGj   * dGamma[j,   m]
-                dr_te[j+1, m] += adj[m] * dr_dGjp1 * dGamma[j+1, m]
-                adj[m] = adj[m] * dr_drbelow
+        psi_s = np.empty(n_lay, dtype=np.complex128)
+        e_s   = np.empty(n_lay, dtype=np.complex128)
+        gb_s  = np.empty(n_lay, dtype=np.complex128)
+
+        for m in range(n_lam):
+            # Upward recursion (paper Eq. 2): gamma_N = 0 ... r_TE = gamma_0.
+            gamma = 0.0 + 0.0j
+            for j in range(n_lay - 1, -1, -1):
+                G_above = (lam[m] + 0.0j) if j == 0 else Gamma[j - 1, m]
+                Gj = Gamma[j, m]
+                psi = (G_above - Gj) / (G_above + Gj)
+                if j < n_lay - 1:
+                    E = np.exp(-2.0 * Gj * thicknesses[j])
+                else:
+                    E = 0.0 + 0.0j
+                gb_s[j]  = gamma
+                psi_s[j] = psi
+                e_s[j]   = E
+                gamma = (psi + gamma * E) / (1.0 + psi * gamma * E)
+            r_te[m] = gamma
+
+            # Adjoint backward pass; contributions scaled by dGamma/d(ln rho).
+            ladj = 1.0 + 0.0j
+            for j in range(n_lay):
+                G_above = (lam[m] + 0.0j) if j == 0 else Gamma[j - 1, m]
+                Gj = Gamma[j, m]
+                psi = psi_s[j]; E = e_s[j]; g = gb_s[j]
+                den2 = (1.0 + psi * g * E)**2
+                dg_dpsi = (1.0 - (g * E)**2) / den2
+                dg_dE   = g * (1.0 - psi**2) / den2
+                dg_dgb  = E * (1.0 - psi**2) / den2
+                dpsi_dGj = -2.0 * G_above / (G_above + Gj)**2
+                if j < n_lay - 1:
+                    dE_dGj = -2.0 * thicknesses[j] * E
+                else:
+                    dE_dGj = 0.0 + 0.0j
+                dr_te[j, m] += ladj * (dg_dpsi * dpsi_dGj + dg_dE * dE_dGj) * dGamma[j, m]
+                if j >= 1:
+                    dr_te[j - 1, m] += ladj * dg_dpsi * (2.0 * Gj / (G_above + Gj)**2) * dGamma[j - 1, m]
+                ladj = ladj * dg_dgb
 
         return r_te, dr_te
 
@@ -140,7 +134,7 @@ if HAS_NUMBA:
                                lam, lam_hj1, mu0,
                                fourier_base, fourier_weights,
                                filter_weights):
-        """Circle dBz/dt + analytical Jacobian (Numba JIT, DLF).
+        """Circle dB/dt + analytical Jacobian (Numba JIT, DLF).
 
         Works for circle_central and circle_offset - only lam_hj1 differs:
             circle_central : lam_hj1 = lam * h_j1
@@ -192,7 +186,7 @@ if HAS_NUMBA:
                              h_base, h_j0, mu0,
                              fourier_base, fourier_weights,
                              filter_weights, altitude=0.0):
-        """Square-loop dBz/dt + analytical Jacobian (Numba JIT, DLF).
+        """Square-loop dB/dt + analytical Jacobian (Numba JIT, DLF).
 
         Works for square_central (one-quadrant GL with quad_scale=4.0) and
         square_offset (full-square GL with quad_scale=1.0).
@@ -254,7 +248,7 @@ if HAS_NUMBA:
     def _tem_circular_grad_euler_jit(times, thicknesses, resistivities,
                                      lam, lam_hj1, mu0, e_eta, e_A,
                                      filter_weights):
-        """Circle dBz/dt + analytical Jacobian (Numba JIT, Euler-Stehfest).
+        """Circle dB/dt + analytical Jacobian (Numba JIT, Euler-Stehfest).
 
         Uses complex Bromwich frequencies omega_k = k*pi/t - (A/2t)*i.
         _te_rte_grad_jit handles complex omega natively - no separate
@@ -307,7 +301,7 @@ if HAS_NUMBA:
                                    dist_q, area_w, quad_scale,
                                    h_base, h_j0, mu0, e_eta, e_A,
                                    filter_weights, altitude=0.0):
-        """Square-loop dBz/dt + analytical Jacobian (Numba JIT, Euler-Stehfest).
+        """Square-loop dB/dt + analytical Jacobian (Numba JIT, Euler-Stehfest).
 
         filter_weights : (n_t, n_eval) complex128 - see _tem_circular_grad_euler_jit.
         Returns dbdt (n_t,) and J_raw (n_t, N) with step-off sign applied.
@@ -414,52 +408,50 @@ if HAS_CUDA:
                          * d_sigma[:, None, None, None]
                          / (2.0 * Gamma))                             # (N, n_t, n_f, K)
 
-        r_store   = cp.zeros((n_lay, n_t, n_f, K), dtype=cp.complex128)
-        exp_store = cp.zeros((n_lay - 1, n_t, n_f, K), dtype=cp.complex128)
-        r         = cp.zeros((n_t, n_f, K), dtype=cp.complex128)
-        r_store[n_lay - 1] = r
+        # Upward recursion (paper Eq. 2), vectorised over (n_t, n_f, K).
+        psi_store = cp.empty((n_lay, n_t, n_f, K), dtype=cp.complex128)
+        exp_store = cp.empty((n_lay, n_t, n_f, K), dtype=cp.complex128)
+        gb_store  = cp.empty((n_lay, n_t, n_f, K), dtype=cp.complex128)
 
-        for j in range(n_lay - 2, -1, -1):
-            psi          = (Gamma[j] - Gamma[j+1]) / (Gamma[j] + Gamma[j+1])
-            exp_j        = cp.exp(-2.0 * Gamma[j] * d_thicknesses[j])
-            exp_store[j] = exp_j
-            r            = exp_j * (r + psi) / (1.0 + r * psi)
-            r_store[j]   = r
+        gamma = cp.zeros((n_t, n_f, K), dtype=cp.complex128)         # gamma_N = 0
+        for j in range(n_lay - 1, -1, -1):
+            G_above = d_lam[None, None, :] if j == 0 else Gamma[j - 1]
+            Gj = Gamma[j]
+            psi = (G_above - Gj) / (G_above + Gj)
+            if j < n_lay - 1:
+                E = cp.exp(-2.0 * Gj * d_thicknesses[j])
+            else:
+                E = cp.zeros((n_t, n_f, K), dtype=cp.complex128)
+            gb_store[j]  = gamma
+            psi_store[j] = psi
+            exp_store[j] = E
+            gamma = (psi + gamma * E) / (1.0 + psi * gamma * E)
+        r_TE = gamma
 
-        psi_air   = (d_lam[None, None, :] - Gamma[0]) / (d_lam[None, None, :] + Gamma[0])
-        r_TE      = (r_store[0] + psi_air) / (1.0 + r_store[0] * psi_air)
-
-        denom_air      = 1.0 + r_store[0] * psi_air
-        dr_TE_dr0      = (1.0 - psi_air**2)    / denom_air**2
-        dr_TE_dpsi_air = (1.0 - r_store[0]**2) / denom_air**2
-        dpsi_air_dG0   = (-2.0 * d_lam[None, None, :]
-                          / (d_lam[None, None, :] + Gamma[0])**2)
-
+        # Adjoint backward pass; contributions scaled by dGamma/d(ln rho).
         dr_TE_all = cp.zeros((n_lay, n_t, n_f, K), dtype=cp.complex128)
-        dr_TE_all[0] += dr_TE_dpsi_air * dpsi_air_dG0 * dGamma_dlnrho[0]
-        adj = dr_TE_dr0.copy()
-
-        for j in range(n_lay - 1):
-            r_below    = r_store[j+1];  exp_j      = exp_store[j]
-            psi_j      = (Gamma[j] - Gamma[j+1]) / (Gamma[j] + Gamma[j+1])
-            numer      = r_below + psi_j;  denom = 1.0 + r_below * psi_j
-            dpsi_dGj   =  2.0 * Gamma[j+1] / (Gamma[j] + Gamma[j+1])**2
-            dpsi_dGjp1 = -2.0 * Gamma[j]   / (Gamma[j] + Gamma[j+1])**2
-            dr_dpsi    = exp_j * (1.0 - r_below**2) / denom**2
-            dr_dGj     = (-2.0 * d_thicknesses[j] * exp_j * numer / denom
-                          + dr_dpsi * dpsi_dGj)
-            dr_dGjp1   = dr_dpsi * dpsi_dGjp1
-            dr_drbelow = exp_j * (1.0 - psi_j**2) / denom**2
-            dr_TE_all[j]   += adj * dr_dGj   * dGamma_dlnrho[j]
-            dr_TE_all[j+1] += adj * dr_dGjp1 * dGamma_dlnrho[j+1]
-            adj = adj * dr_drbelow
+        ladj = cp.ones((n_t, n_f, K), dtype=cp.complex128)          # d r_TE / d gamma_0
+        for j in range(n_lay):
+            G_above = d_lam[None, None, :] if j == 0 else Gamma[j - 1]
+            Gj = Gamma[j]
+            psi = psi_store[j]; E = exp_store[j]; g = gb_store[j]
+            den2 = (1.0 + psi * g * E)**2
+            dg_dpsi = (1.0 - (g * E)**2) / den2
+            dg_dE   = g * (1.0 - psi**2) / den2
+            dg_dgb  = E * (1.0 - psi**2) / den2
+            dpsi_dGj = -2.0 * G_above / (G_above + Gj)**2
+            dE_dGj = (-2.0 * d_thicknesses[j] * E) if j < n_lay - 1 else 0.0
+            dr_TE_all[j] += ladj * (dg_dpsi * dpsi_dGj + dg_dE * dE_dGj) * dGamma_dlnrho[j]
+            if j >= 1:
+                dr_TE_all[j - 1] += ladj * dg_dpsi * (2.0 * Gj / (G_above + Gj)**2) * dGamma_dlnrho[j - 1]
+            ladj = ladj * dg_dgb
 
         return r_TE, dr_TE_all
 
     def _tem_circular_grad_gpu(times, thicknesses, resistivities, tx_radius,
                                lam_hj1, d_h_base, d_f_base, d_f_sin,
                                d_filter_weights):
-        """Circle dBz/dt + analytical Jacobian on GPU (DLF).
+        """Circle dB/dt + analytical Jacobian on GPU (DLF).
 
         Works for circle_central and circle_offset via lam_hj1.
 
@@ -474,27 +466,44 @@ if HAS_CUDA:
         d_rho     = cp.asarray(resistivities, dtype=cp.float64)
         d_lam     = d_h_base / float(tx_radius)
         d_lam_hj1 = cp.asarray(lam_hj1)
-        omega_2d  = d_f_base[None, :] / d_times[:, None]   # (n_t, n_f) real
+        n_t   = len(times)
+        n_f   = len(d_f_base)
+        K     = len(d_h_base)
+        n_lay = len(resistivities)
+        omega_full = d_f_base[None, :] / d_times[:, None]   # (n_t, n_f) real
 
-        r_te, dr_te = _te_reflection_coeff_grad_gpu(d_lam, omega_2d, d_thick, d_rho)
-        # r_te: (n_t, n_f, K),  dr_te: (N, n_t, n_f, K)
+        d_dbdt = cp.empty(n_t,          dtype=cp.float64)
+        d_Jraw = cp.empty((n_t, n_lay), dtype=cp.float64)
 
-        hz  = 0.5 * cp.sum(r_te  * d_lam_hj1[None, None, :],           axis=2)  # (n_t, n_f)
-        dhz = 0.5 * cp.sum(dr_te * d_lam_hj1[None, None, None, :], axis=3)      # (N, n_t, n_f)
+        # Chunk the (independent) gate-time axis so the (n_lay, chunk, n_f, K)
+        # recursion tensors fit GPU memory instead of thrashing on OOM retries.
+        chunk = max(1, int(0.75e9 // (6 * max(1, n_lay) * n_f * K * 16)))
 
-        # Apply system filter: H(omega) multiplies complex Hz before imaginary part
-        sig  = MU0 * (hz  * d_filter_weights).imag              # (n_t, n_f)
-        dsig = MU0 * (dhz * d_filter_weights[None, :, :]).imag  # (N, n_t, n_f)
+        for i0 in range(0, n_t, chunk):
+            i1       = min(i0 + chunk, n_t)
+            omega_2d = omega_full[i0:i1]
+            fw_c     = d_filter_weights[i0:i1]
+            dt_c     = d_times[i0:i1]
 
-        dbdt  = cp.sum(sig  * d_f_sin[None, :],           axis=1) / d_times          # (n_t,)
-        J_raw = (cp.sum(dsig * d_f_sin[None, None, :], axis=2) / d_times[None, :]).T  # (n_t, N)
-        return cp.asnumpy(dbdt), cp.asnumpy(J_raw)
+            r_te, dr_te = _te_reflection_coeff_grad_gpu(d_lam, omega_2d, d_thick, d_rho)
+            # r_te: (c, n_f, K),  dr_te: (N, c, n_f, K)
+
+            hz  = 0.5 * cp.sum(r_te  * d_lam_hj1[None, None, :],           axis=2)  # (c, n_f)
+            dhz = 0.5 * cp.sum(dr_te * d_lam_hj1[None, None, None, :], axis=3)      # (N, c, n_f)
+
+            # Apply system filter: H(omega) multiplies complex Hz before imaginary part
+            sig  = MU0 * (hz  * fw_c).imag              # (c, n_f)
+            dsig = MU0 * (dhz * fw_c[None, :, :]).imag  # (N, c, n_f)
+
+            d_dbdt[i0:i1] = cp.sum(sig  * d_f_sin[None, :],           axis=1) / dt_c          # (c,)
+            d_Jraw[i0:i1] = (cp.sum(dsig * d_f_sin[None, None, :], axis=2) / dt_c[None, :]).T  # (c, N)
+        return cp.asnumpy(d_dbdt), cp.asnumpy(d_Jraw)
 
     def _tem_square_grad_gpu(times, thicknesses, resistivities,
                              dist_q, area_w, quad_scale,
                              d_h_base, d_h_j0, d_f_base, d_f_sin,
                              d_filter_weights, altitude=0.0):
-        """Square-loop dBz/dt + analytical Jacobian on GPU (DLF).
+        """Square-loop dB/dt + analytical Jacobian on GPU (DLF).
 
         Loops over n_q quadrature points; each iteration runs the full
         (n_t, n_f, K) adjoint on the GPU then accumulates with area weight.
@@ -506,33 +515,46 @@ if HAS_CUDA:
         d_thick  = cp.asarray(thicknesses, dtype=cp.float64)
         d_rho    = cp.asarray(resistivities, dtype=cp.float64)
         n_t      = len(times)
+        n_f      = len(d_f_base)
         n_lay    = len(resistivities)
-        omega_2d = d_f_base[None, :] / d_times[:, None]   # (n_t, n_f)
+        K        = len(d_h_base)
+        omega_full = d_f_base[None, :] / d_times[:, None]   # (n_t, n_f)
         _4pi     = 4.0 * np.pi
+        dist_q   = np.asarray(dist_q, dtype=float)          # host scalars
+        area_w   = np.asarray(area_w, dtype=float)
 
         d_dbdt = cp.zeros(n_t,          dtype=cp.float64)
         d_Jraw = cp.zeros((n_t, n_lay), dtype=cp.float64)
 
-        for q in range(len(dist_q)):
-            rq       = float(dist_q[q]);  wq = float(area_w[q])
-            d_lam_q  = d_h_base / rq
-            d_kern_q = d_lam_q**2 * d_h_j0 / (rq * _4pi)
-            if altitude != 0.0:
-                d_kern_q = d_kern_q * cp.exp(-d_lam_q * altitude)
+        # Chunk the (independent) gate-time axis so the recursion's
+        # (n_lay, chunk, n_f, K) tensors fit GPU memory instead of thrashing on
+        # OOM retries when the full n_t batch is too large.  ~6 live tensors.
+        chunk = max(1, int(0.75e9 // (6 * max(1, n_lay) * n_f * K * 16)))
 
-            r_te, dr_te = _te_reflection_coeff_grad_gpu(
-                d_lam_q, omega_2d, d_thick, d_rho)
-            # r_te: (n_t, n_f, K),  dr_te: (N, n_t, n_f, K)
+        for a in range(0, n_t, chunk):
+            b        = min(a + chunk, n_t)
+            omega_2d = omega_full[a:b]                       # (c, n_f)
+            fw_c     = d_filter_weights[a:b]                 # (c, n_f)
+            dt_c     = d_times[a:b]                          # (c,)
+            for q in range(len(dist_q)):
+                rq       = float(dist_q[q]);  wq = float(area_w[q])
+                d_lam_q  = d_h_base / rq
+                d_kern_q = d_lam_q**2 * d_h_j0 / (rq * _4pi)
+                if altitude != 0.0:
+                    d_kern_q = d_kern_q * cp.exp(-d_lam_q * altitude)
 
-            hz  = cp.sum(r_te  * d_kern_q[None, None, :],           axis=2)  # (n_t, n_f)
-            dhz = cp.sum(dr_te * d_kern_q[None, None, None, :], axis=3)      # (N, n_t, n_f)
+                r_te, dr_te = _te_reflection_coeff_grad_gpu(
+                    d_lam_q, omega_2d, d_thick, d_rho)
+                # r_te: (c, n_f, K),  dr_te: (N, c, n_f, K)
 
-            # Apply system filter before imaginary part
-            sig  = MU0 * (hz  * d_filter_weights).imag              # (n_t, n_f)
-            dsig = MU0 * (dhz * d_filter_weights[None, :, :]).imag  # (N, n_t, n_f)
+                hz  = cp.sum(r_te  * d_kern_q[None, None, :],           axis=2)  # (c, n_f)
+                dhz = cp.sum(dr_te * d_kern_q[None, None, None, :], axis=3)      # (N, c, n_f)
 
-            d_dbdt += wq * cp.sum(sig  * d_f_sin[None, :],           axis=1) / d_times
-            d_Jraw += wq * (cp.sum(dsig * d_f_sin[None, None, :], axis=2) / d_times[None, :]).T
+                sig  = MU0 * (hz  * fw_c).imag              # (c, n_f)
+                dsig = MU0 * (dhz * fw_c[None, :, :]).imag  # (N, c, n_f)
+
+                d_dbdt[a:b] += wq * cp.sum(sig  * d_f_sin[None, :],           axis=1) / dt_c
+                d_Jraw[a:b] += wq * (cp.sum(dsig * d_f_sin[None, None, :], axis=2) / dt_c[None, :]).T
 
         d_dbdt *= quad_scale
         d_Jraw *= quad_scale
@@ -541,7 +563,7 @@ if HAS_CUDA:
     def _tem_circular_grad_euler_gpu(times, thicknesses, resistivities, tx_radius,
                                      lam_hj1, d_h_base, e_eta, e_A,
                                      d_filter_weights):
-        """Circle dBz/dt + analytical Jacobian on GPU (Euler-Stehfest).
+        """Circle dB/dt + analytical Jacobian on GPU (Euler-Stehfest).
 
         _te_reflection_coeff_grad_gpu handles complex omega_2d natively, so
         no separate Euler kernel is needed - the same GPU adjoint recursion
@@ -558,37 +580,45 @@ if HAS_CUDA:
         d_rho     = cp.asarray(resistivities, dtype=cp.float64)
         d_lam     = d_h_base / float(tx_radius)
         d_lam_hj1 = cp.asarray(lam_hj1)
+        n_t       = len(times)
         n_eval    = len(e_eta)
+        K         = len(d_h_base)
+        n_lay     = len(resistivities)
         k_arr     = cp.arange(n_eval, dtype=cp.float64)
-        c_vals    = float(e_A) / (2.0 * d_times)
-        h_vals    = cp.full(len(times), np.pi) / d_times
-        omega_2d  = k_arr[None, :] * h_vals[:, None] - c_vals[:, None] * 1j  # (n_t, n_eval)
+        signs_k   = cp.asarray((-1.0)**np.arange(n_eval) * e_eta)   # (n_eval,)
+        prefac_all = cp.exp(float(e_A) / 2.0) / d_times            # (n_t,)
 
-        r_te, dr_te = _te_reflection_coeff_grad_gpu(d_lam, omega_2d, d_thick, d_rho)
-        # r_te: (n_t, n_eval, K),  dr_te: (N, n_t, n_eval, K)
+        d_dbdt = cp.empty(n_t,          dtype=cp.float64)
+        d_Jraw = cp.empty((n_t, n_lay), dtype=cp.float64)
+        chunk  = max(1, int(0.75e9 // (6 * max(1, n_lay) * n_eval * K * 16)))
 
-        hz  = 0.5 * cp.sum(r_te  * d_lam_hj1[None, None, :],           axis=2)  # (n_t, n_eval)
-        dhz = 0.5 * cp.sum(dr_te * d_lam_hj1[None, None, None, :], axis=3)      # (N, n_t, n_eval)
+        for i0 in range(0, n_t, chunk):
+            i1     = min(i0 + chunk, n_t)
+            dt_c   = d_times[i0:i1]
+            fw_c   = d_filter_weights[i0:i1]
+            c_vals = float(e_A) / (2.0 * dt_c)
+            h_vals = cp.full(i1 - i0, np.pi) / dt_c
+            omega_2d = k_arr[None, :] * h_vals[:, None] - c_vals[:, None] * 1j  # (c, n_eval)
 
-        signs_k = cp.asarray((-1.0)**np.arange(n_eval) * e_eta)   # (n_eval,)
+            r_te, dr_te = _te_reflection_coeff_grad_gpu(d_lam, omega_2d, d_thick, d_rho)
+            hz  = 0.5 * cp.sum(r_te  * d_lam_hj1[None, None, :],           axis=2)
+            dhz = 0.5 * cp.sum(dr_te * d_lam_hj1[None, None, None, :], axis=3)
 
-        # Apply system filter before taking real part, then dot with Euler coefficients
-        hz_filt  = hz  * d_filter_weights                    # (n_t, n_eval)
-        dhz_filt = dhz * d_filter_weights[None, :, :]        # (N, n_t, n_eval)
+            hz_filt  = hz  * fw_c
+            dhz_filt = dhz * fw_c[None, :, :]
+            hz_acc  = MU0 * cp.sum(signs_k[None, :]       * hz_filt.real,  axis=1)
+            dhz_acc = MU0 * cp.sum(signs_k[None, None, :] * dhz_filt.real, axis=2)
 
-        hz_acc  = MU0 * cp.sum(signs_k[None, :]       * hz_filt.real,  axis=1)  # (n_t,)
-        dhz_acc = MU0 * cp.sum(signs_k[None, None, :] * dhz_filt.real, axis=2)  # (N, n_t)
-
-        prefac = cp.exp(float(e_A) / 2.0) / d_times              # (n_t,)
-        dbdt   = -prefac * hz_acc                                  # step-off sign
-        J_raw  = (-prefac[None, :] * dhz_acc).T                   # (n_t, N)
-        return cp.asnumpy(dbdt), cp.asnumpy(J_raw)
+            prefac = prefac_all[i0:i1]
+            d_dbdt[i0:i1] = -prefac * hz_acc
+            d_Jraw[i0:i1] = (-prefac[None, :] * dhz_acc).T
+        return cp.asnumpy(d_dbdt), cp.asnumpy(d_Jraw)
 
     def _tem_square_grad_euler_gpu(times, thicknesses, resistivities,
                                    dist_q, area_w, quad_scale,
                                    d_h_base, d_h_j0, e_eta, e_A,
                                    d_filter_weights, altitude=0.0):
-        """Square-loop dBz/dt + analytical Jacobian on GPU (Euler-Stehfest).
+        """Square-loop dB/dt + analytical Jacobian on GPU (Euler-Stehfest).
 
         d_filter_weights : (n_t, n_eval) cupy complex128 - see _tem_circular_grad_euler_gpu.
         Returns (dbdt, J_raw) as NumPy arrays, shapes (n_t,) and (n_t, N).
@@ -599,39 +629,48 @@ if HAS_CUDA:
         n_t      = len(times)
         n_lay    = len(resistivities)
         n_eval   = len(e_eta)
+        K        = len(d_h_base)
         _4pi     = 4.0 * np.pi
+        dist_q   = np.asarray(dist_q, dtype=float)          # host scalars
+        area_w   = np.asarray(area_w, dtype=float)
         k_arr    = cp.arange(n_eval, dtype=cp.float64)
-        c_vals   = float(e_A) / (2.0 * d_times)
-        h_vals   = cp.full(n_t, np.pi) / d_times
-        omega_2d = k_arr[None, :] * h_vals[:, None] - c_vals[:, None] * 1j  # (n_t, n_eval)
         signs_k  = cp.asarray((-1.0)**np.arange(n_eval) * e_eta)
+        prefac_all = cp.exp(float(e_A) / 2.0) / d_times
 
         d_hz_acc  = cp.zeros(n_t,          dtype=cp.float64)
         d_dhz_acc = cp.zeros((n_t, n_lay), dtype=cp.float64)
 
-        for q in range(len(dist_q)):
-            rq       = float(dist_q[q]);  wq = float(area_w[q])
-            d_lam_q  = d_h_base / rq
-            d_kern_q = d_lam_q**2 * d_h_j0 / (rq * _4pi)
-            if altitude != 0.0:
-                d_kern_q = d_kern_q * cp.exp(-d_lam_q * altitude)
+        chunk = max(1, int(0.75e9 // (6 * max(1, n_lay) * n_eval * K * 16)))
 
-            r_te, dr_te = _te_reflection_coeff_grad_gpu(d_lam_q, omega_2d, d_thick, d_rho)
-            # r_te: (n_t, n_eval, K),  dr_te: (N, n_t, n_eval, K)
+        for i0 in range(0, n_t, chunk):
+            i1     = min(i0 + chunk, n_t)
+            dt_c   = d_times[i0:i1]
+            fw_c   = d_filter_weights[i0:i1]
+            c_vals = float(e_A) / (2.0 * dt_c)
+            h_vals = cp.full(i1 - i0, np.pi) / dt_c
+            omega_2d = k_arr[None, :] * h_vals[:, None] - c_vals[:, None] * 1j  # (c, n_eval)
 
-            hz  = cp.sum(r_te  * d_kern_q[None, None, :],           axis=2)  # (n_t, n_eval)
-            dhz = cp.sum(dr_te * d_kern_q[None, None, None, :], axis=3)      # (N, n_t, n_eval)
+            for q in range(len(dist_q)):
+                rq       = float(dist_q[q]);  wq = float(area_w[q])
+                d_lam_q  = d_h_base / rq
+                d_kern_q = d_lam_q**2 * d_h_j0 / (rq * _4pi)
+                if altitude != 0.0:
+                    d_kern_q = d_kern_q * cp.exp(-d_lam_q * altitude)
 
-            # Apply system filter before taking real part
-            hz_filt  = hz  * d_filter_weights                 # (n_t, n_eval)
-            dhz_filt = dhz * d_filter_weights[None, :, :]    # (N, n_t, n_eval)
+                r_te, dr_te = _te_reflection_coeff_grad_gpu(d_lam_q, omega_2d, d_thick, d_rho)
+                # r_te: (c, n_eval, K),  dr_te: (N, c, n_eval, K)
 
-            d_hz_acc  += wq * MU0 * cp.sum(signs_k[None, :]       * hz_filt.real,  axis=1)
-            d_dhz_acc += wq * (MU0 * cp.sum(signs_k[None, None, :] * dhz_filt.real, axis=2)).T
+                hz  = cp.sum(r_te  * d_kern_q[None, None, :],           axis=2)  # (c, n_eval)
+                dhz = cp.sum(dr_te * d_kern_q[None, None, None, :], axis=3)      # (N, c, n_eval)
+
+                hz_filt  = hz  * fw_c                 # (c, n_eval)
+                dhz_filt = dhz * fw_c[None, :, :]     # (N, c, n_eval)
+
+                d_hz_acc[i0:i1]  += wq * MU0 * cp.sum(signs_k[None, :]       * hz_filt.real,  axis=1)
+                d_dhz_acc[i0:i1] += wq * (MU0 * cp.sum(signs_k[None, None, :] * dhz_filt.real, axis=2)).T
 
         d_hz_acc  *= quad_scale
         d_dhz_acc *= quad_scale
-        prefac     = cp.exp(float(e_A) / 2.0) / d_times
-        d_dbdt     = -prefac * d_hz_acc
-        d_Jraw     = -(prefac[:, None] * d_dhz_acc)
+        d_dbdt     = -prefac_all * d_hz_acc
+        d_Jraw     = -(prefac_all[:, None] * d_dhz_acc)
         return cp.asnumpy(d_dbdt), cp.asnumpy(d_Jraw)

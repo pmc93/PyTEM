@@ -22,7 +22,7 @@ Layer 0 - Data and constants
 
 Layer 1 - Core physics and backend detection
     recursion.py           te_reflection_coeff / te_reflection_coeff_grad:
-                           the Wait (1954) TE reflection coefficient of the
+                           the TE reflection coefficient of the
                            layer stack and its log-resistivity gradient (NumPy,
                            complex).  This is the physical heart of the model.
                                -> transform_weights
@@ -36,7 +36,7 @@ Layer 2 - Compute kernels (one physics, three backends)
                            Euler).  Sets HAS_NUMBA.
     kernels_gpu.py         CuPy/CUDA forward kernels (mirror of kernels_numba).
                                -> transform_weights, backends
-    kernels_jacobian.py    Adjoint Wait recursion: forward+backward pass giving
+    kernels_jacobian.py    Adjoint upward recursion: forward+backward pass giving
                            d(r_TE)/d(ln rho_j) for all layers at once, in both
                            Numba and CuPy variants.  Backs the analytical
                            Jacobian.
@@ -101,7 +101,7 @@ Forward:
         _filter_weights()         -> optional system_filter samples
         _build_circular_geometry()-> per-wavenumber weights
         _run_circular()           -> CUDA | Numba | pure-Python kernel
-            te_reflection_coeff() -> Wait recursion (recursion.py / kernels)
+            te_reflection_coeff() -> upward recursion (recursion.py / kernels)
         _apply_signal_scaling()   -> current and step-off/on/impulse sign
 
 Inversion:
@@ -128,7 +128,7 @@ from .forward import (
     fwd_analytical_offset,
 )
 
-from .waveform import convolve_waveform
+from .waveform import convolve_waveform, setup_waveform, setup_waveform_matrix
 from .system_filter import butterworth_filter, cascade_filter
 from .euler import euler_invert
 from .inversion import (getJ_ana, getJ_fd, getR, dbdt_to_apprho, getRMS,
@@ -161,6 +161,8 @@ __all__ = [
     'fwd_analytical_offset',
     # Waveform & system filter
     'convolve_waveform',
+    'setup_waveform',
+    'setup_waveform_matrix',
     'butterworth_filter',
     'cascade_filter',
     # IP models

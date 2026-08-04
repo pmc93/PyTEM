@@ -105,7 +105,7 @@ def mpa_rho(rho_0, phi_max, tau_phi, c, omega):
 def tem_forward_ip(thicknesses, resistivities, tx_radius, times,
                    ip_funcs=None, current=1.0, system_filter=None):
     """
-    Central-loop TEM step-off dBz/dt with arbitrary IP model per layer.
+    Central-loop TEM step-off dB/dt with arbitrary IP model per layer.
 
     Parameters
     ----------
@@ -121,7 +121,7 @@ def tem_forward_ip(thicknesses, resistivities, tx_radius, times,
 
     Returns
     -------
-    dbdt : ndarray - dBz/dt [V/m^2]
+    dbdt : ndarray - dB/dt [V/m^2]
     """
     thicknesses = np.asarray(thicknesses, dtype=float)
     rho_dc = np.asarray(resistivities, dtype=float)
