@@ -291,8 +291,6 @@ def quintic_b_spline(x):
     return out
 
 
-# Backward-compatible alias.
-lamontagne_spline = quintic_b_spline
 
 def _trapezoid_weights(t):
     w = np.zeros_like(t, dtype=float)
