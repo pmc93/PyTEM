@@ -185,9 +185,9 @@ def _build_ves_fig(ab2_t, rhoap_t, rhoap_ref_t, thick_t, rho_t, mobile):
 # ── Page header ───────────────────────────────────────────────────────────────
 st.header(":blue[Predicted response for a layered earth model]")
 st.markdown(
-    "Build a layered resistivity model on the **right** and see the predicted "
-    "sounding curve update on the **left** in real time. The sliders change the "
-    "*earth model* (layer thicknesses and resistivities); the left panel is the "
+    "Build a layered resistivity model on and see the predicted "
+    "sounding curve update in real time. The sliders change the "
+    "*earth model* (layer thicknesses and resistivities); the plot is the "
     "*simulated measurement* that such an earth would produce, not something you "
     "edit directly. The layered earth model below is **shared between the TEM and "
     "VES tabs**, so switching method keeps the same structure and makes the two "
@@ -202,8 +202,8 @@ with st.expander("Why forward modelling?", expanded=False):
         resistivity structure, what would the instrument measure?* It is the numerical engine
         inside every inversion. 
 
-        Move the sliders below and watch the left panel (the measured curve) respond
-        to the right panel (your model).
+        Move the sliders below and watch the theoretical response change in real time.
+    
         """
     )
 
