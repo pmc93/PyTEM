@@ -4,8 +4,8 @@ waveform.py - Waveform convolution for piecewise-linear transmitter waveforms.
 Contains:
   setup_waveform         - precompute quadrature structure (empymod-style)
   convolve_waveform      - public API (dispatches to Numba JIT when available)
-    setup_waveform_matrix  - convolution-free Lamontagne spline matrix operator
-  lamontagne_spline      - compact-support quintic interpolation kernel
+  setup_waveform_matrix  - convolution-free quintic B-spline matrix operator
+  quintic_b_spline       - compact-support quintic interpolation kernel
   _log_interp_scalar     - Numba JIT log-time interpolation
   _convolve_waveform_jit - Numba JIT inner loops
 """
@@ -260,7 +260,7 @@ def convolve_waveform(step_times, step_response, waveform_times,
 
 
 # ---------------------------------------------------------------------------
-# Convolution-free Lamontagne spline matrix method
+# Convolution-free quintic B-spline matrix method
 # ---------------------------------------------------------------------------
 #
 # The waveform + gating convolution is written as a single fixed matrix M so
@@ -269,27 +269,30 @@ def convolve_waveform(step_times, step_response, waveform_times,
 # timing (waveform breakpoints, gate times, step grid) and never on the earth
 # model, so it is built once and reused across every inversion iteration.
 #
-# Interpolation kernel: the compactly-supported Lamontagne quintic spline
-# (Boerner & West, 1984), phi(x) = 0 for |x| > 2.
+# Interpolation kernel: the compactly-supported quintic B-spline,
+# phi(x) = 0 for |x| > 2.
 
-def _lamontagne_S1(x):
+def _quintic_b_spline_S1(x):
     return 1 - (9 / 4) * x ** 2 * (1 - (2 / 9) * x * (1 + (5 / 2) * x * (1 - (2 / 5) * x)))
 
 
-def _lamontagne_S2(x):
+def _quintic_b_spline_S2(x):
     return -(1 / 2) * x * (1 - (11 / 6) * x * (1 - (2 / 11) * x * (1 + (5 / 2) * x * (1 - (2 / 5) * x))))
 
 
-def lamontagne_spline(x):
-    """Lamontagne quintic interpolation spline, vectorised. Support on [-2, 2]."""
+def quintic_b_spline(x):
+    """Quintic B-spline interpolation kernel, vectorised. Support on [-2, 2]."""
     x = np.asarray(x, dtype=float)
     out = np.zeros_like(x)
-    m = (x >= -2) & (x <= -1); out[m] = _lamontagne_S2(-x[m] - 1)
-    m = (x > -1) & (x <= 0);   out[m] = _lamontagne_S1(-x[m])
-    m = (x > 0) & (x <= 1);    out[m] = _lamontagne_S1(x[m])
-    m = (x > 1) & (x <= 2);    out[m] = _lamontagne_S2(x[m] - 1)
+    m = (x >= -2) & (x <= -1); out[m] = _quintic_b_spline_S2(-x[m] - 1)
+    m = (x > -1) & (x <= 0);   out[m] = _quintic_b_spline_S1(-x[m])
+    m = (x > 0) & (x <= 1);    out[m] = _quintic_b_spline_S1(x[m])
+    m = (x > 1) & (x <= 2);    out[m] = _quintic_b_spline_S2(x[m] - 1)
     return out
 
+
+# Backward-compatible alias.
+lamontagne_spline = quintic_b_spline
 
 def _trapezoid_weights(t):
     w = np.zeros_like(t, dtype=float)
@@ -346,7 +349,7 @@ def _waveform_slope_kernel(waveform_times, waveform_currents, n_per_segment=81):
 
 
 def _build_waveform_matrix(tk, Wk, t_in, t_out):
-    """Compact-support assembly of the waveform matrix using Lamontagne basis.
+    """Compact-support assembly of the waveform matrix using quintic B-spline.
 
     M[o, i] = sum_k W_k * phi( (log(t_out_o - t_k) - log(t_in_i)) / dlogt )
 
@@ -373,7 +376,7 @@ def _build_waveform_matrix(tk, Wk, t_in, t_out):
         if np.any(inside):
             row_idx = np.broadcast_to(rows[:, None], cols.shape)[inside]
             col_idx = cols[inside]
-            np.add.at(M, (row_idx, col_idx), wk * lamontagne_spline(x[inside]))
+            np.add.at(M, (row_idx, col_idx), wk * quintic_b_spline(x[inside]))
     return M
 
 
@@ -443,7 +446,7 @@ def _int_poly_exp_gl(poly, a, lo, hi):
 
 
 def _build_gating_matrix(gate_open, gate_close, t_grid):
-    """Boxcar-gate average of the Lamontagne basis on a log grid.
+    """Boxcar-gate average of the quintic B-spline basis on a log grid.
 
     G[g, i] = (1 / (b - a)) * integral_a^b phi((log t - log t_i)/dlogt) dt,
     integrated per gate [a, b] with stable Gauss-Legendre quadrature.
@@ -481,7 +484,7 @@ def setup_waveform_matrix(gate_times, waveform_times, waveform_currents,
                           n_step=600, n_per_segment=81, n_dense_gate=400,
                           pad_decades=2.0):
     """
-    Convolution-free waveform operator based on a Lamontagne spline matrix.
+    Convolution-free waveform operator based on a quintic B-spline matrix.
 
     Builds a single fixed matrix ``M`` so the waveform (and optional receiver
     gate integration) reduces to one matmul ``d = M @ step_resp``. This matches
