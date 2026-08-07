@@ -1,4 +1,4 @@
-# pyTEM
+# PyTEM
 
 1-D layered-earth Time-Domain Electromagnetic (TEM) modelling and inversion in Python.
 
