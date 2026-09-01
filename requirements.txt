@@ -5,3 +5,6 @@ pandas
 numba
 scipy
 optuna
+pyproj
+contextily
+matplotlib-scalebar

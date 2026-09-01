@@ -73,6 +73,15 @@ Utilities and add-ons (composable, mostly standalone)
                            verify the production Euler path.      (standalone)
     plotter.py             Matplotlib helpers: plot_sounding, plot_model,
                            plot_inversion.                        (standalone)
+    data_io.py             Field-data import: read_tem_xyz / read_kenbec_xyz /
+                           read_xyz parse TEM Data Manager and TEMImage-Beta
+                           `.xyz` exports into TEMData / KenbecTEMData, with
+                           shared dbdt/snr/to_pytem and line/UTM/distance
+                           helpers.                               (standalone)
+    survey.py              Survey: quick-look sounding, transect and station-
+                           map plots built on data_io containers. LM/HM are
+                           always plotted separately (different waveforms).
+                               -> data_io
 
     __init__.py            Re-exports the public API listed in __all__.
 
@@ -134,6 +143,8 @@ from .euler import euler_invert
 from .inversion import (getJ_ana, getJ_fd, getR, dbdt_to_apprho, getRMS,
                         getAlpha, getAlphas, invert)
 from .plotter import plot_sounding, plot_model, plot_inversion
+from .data_io import TEMData, KenbecTEMData, read_tem_xyz, read_kenbec_xyz, read_xyz
+from .survey import Survey
 
 from .ip_models import (
     pelton_res_rho,
@@ -186,5 +197,12 @@ __all__ = [
     # Plotting
     'plot_sounding',
     'plot_model',
-    'plot_inversion'
+    'plot_inversion',
+    # Field-data import & survey plotting
+    'TEMData',
+    'KenbecTEMData',
+    'read_tem_xyz',
+    'read_kenbec_xyz',
+    'read_xyz',
+    'Survey',
 ]

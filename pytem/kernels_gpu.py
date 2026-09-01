@@ -214,6 +214,9 @@ if HAS_CUDA:
         K = len(d_h_base)
         n_lay = len(resistivities)
         area_w = np.asarray(area_w, dtype=float)
+        d_times = cp.asarray(times)
+        d_thick = cp.asarray(thicknesses, dtype=cp.float64)
+        d_rho_lay = cp.asarray(resistivities, dtype=cp.float64)
         d_eta = cp.asarray(euler_eta)
         half_A = euler_A / 2.0
         ks = cp.arange(n_euler, dtype=cp.float64)
