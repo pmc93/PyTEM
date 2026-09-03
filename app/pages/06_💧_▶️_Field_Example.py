@@ -155,7 +155,7 @@ def _build_raw_fig(times_t, dbdt_obs_t, ab2_t, rhoa_obs_t, mobile):
 
 
 fig_raw = _build_raw_fig(tuple(times), tuple(dbdt_obs), tuple(ab2), tuple(rhoa_obs), is_mobile())
-st.image(fig_raw, use_column_width=True)
+st.image(fig_raw, use_container_width=True)
 
 # -- Inversion controls --------------------------------------------------------
 st.subheader("2. Invert both soundings for a resistivity-depth model")
@@ -343,7 +343,7 @@ if "wa_result" in st.session_state and "wa_result_ves" in st.session_state:
         tuple(times), tuple(dbdt_obs), tuple(ab2), tuple(rhoa_obs),
         bool(show_units), is_mobile(),
     )
-    st.image(fig, use_column_width=True)
+    st.image(fig, use_container_width=True)
 
     # -- Interpretation --------------------------------------------------------
     st.subheader("3. Hydrogeological interpretation")

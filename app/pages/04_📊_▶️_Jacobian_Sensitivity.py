@@ -256,11 +256,11 @@ tab_tem, tab_ves = st.tabs(["🧲 TEM", "⚡️ VES"])
 
 with tab_tem:
     fig_tem = _build_jac_tem_fig(times, dbdt, J_tem, tuple(layer_lbls), _N_DATA, is_mobile())
-    st.image(fig_tem, use_column_width=True)
+    st.image(fig_tem, use_container_width=True)
 
 with tab_ves:
     fig_ves = _build_jac_ves_fig(ab2, rhoap, J_ves, tuple(layer_lbls), _N_DATA, is_mobile())
-    st.image(fig_ves, use_column_width=True)
+    st.image(fig_ves, use_container_width=True)
 
 st.caption(
     "Red = increasing resistivity raises the data value; blue = opposite. "

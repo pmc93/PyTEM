@@ -267,7 +267,7 @@ with tab_tem:
             tuple(np.asarray(dbdt_ref).tolist()), tuple(thick_tem), tuple(rho_tem),
             is_mobile(),
         )
-        st.image(fig, use_column_width=True)
+        st.image(fig, use_container_width=True)
         with st.expander("How to read the TEM curve"):
             st.markdown(
                 """
@@ -333,7 +333,7 @@ with tab_ves:
             tuple(np.asarray(rhoap_ref).tolist()), tuple(thick_ves), tuple(rho_ves),
             is_mobile(),
         )
-        st.image(fig, use_column_width=True)
+        st.image(fig, use_container_width=True)
         with st.expander("How to read the VES curve"):
             st.markdown(
                 """

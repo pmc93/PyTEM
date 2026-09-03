@@ -270,7 +270,7 @@ with tab_tem:
             tuple(np.asarray(pred_t).tolist()), h1, rho1, rho2,
             is_mobile(),
         )
-        st.image(fig, use_column_width=True)
+        st.image(fig, use_container_width=True)
 
         with st.expander("Reveal the hidden true model"):
             st.markdown(
@@ -339,7 +339,7 @@ with tab_ves:
             tuple(np.asarray(pred_v).tolist()), h1, rho1, rho2,
             is_mobile(),
         )
-        st.image(fig, use_column_width=True)
+        st.image(fig, use_container_width=True)
 
         with st.expander("Reveal the hidden true model"):
             st.markdown(
