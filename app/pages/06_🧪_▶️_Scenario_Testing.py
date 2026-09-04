@@ -6,6 +6,8 @@ import sys
 
 import numpy as np
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+from matplotlib.ticker import FuncFormatter
 import streamlit as st
 
 
@@ -42,6 +44,71 @@ def _fig_png(fig):
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=110, bbox_inches="tight")
     return buffer.getvalue()
+
+
+@st.cache_data(show_spinner=False)
+def _build_resistivity_ranges_figure(mobile):
+    materials = (
+        ("Crystalline Bedrock\n(Granite/Gneiss)", 500.0, 100000.0),
+        ("Dolomite/Limestone", 100.0, 10000.0),
+        ("Sandstones and\nConglomerates", 10.0, 1000.0),
+        ("Shales", 3.0, 30.0),
+        ("Gravels and Sands", 5.0, 500.0),
+        ("Clays and Silts", 1.0, 100.0),
+        ("Freshwater", 2.0, 20.0),
+        ("Salt-\nwater", 0.1, 0.5),
+    )
+    fig = Figure(figsize=(8, 5.5) if mobile else (12, 5.5), constrained_layout=True)
+    ax = fig.subplots()
+    ax.set_xscale("log")
+    ax.set_xlim(0.05, 200000)
+    ax.set_ylim(0, len(materials))
+    ax.set_yticks([])
+    ax.set_xlabel("Resistivity [Ohm.m]")
+    ax.set_title("Representative material resistivity ranges")
+
+    for index, (name, rho_min, rho_max) in enumerate(materials):
+        x = np.logspace(np.log10(rho_min), np.log10(rho_max), 500)
+        y = np.linspace(index + 0.3, index + 0.7, 2)
+        grid_x, grid_y = np.meshgrid(x, y)
+        ax.pcolormesh(
+            grid_x, grid_y, np.log10(grid_x), shading="auto", cmap="turbo",
+            vmin=np.log10(0.01), vmax=np.log10(100000),
+        )
+        ax.add_patch(Rectangle(
+            (rho_min, index + 0.1), rho_max - rho_min, 0.8,
+            linewidth=1, edgecolor="black", facecolor="none",
+        ))
+        ax.text(
+            np.sqrt(rho_min * rho_max), index + 0.5, name,
+            ha="center", va="center", fontsize=9, fontweight="bold",
+        )
+
+    clay_index = 5
+    sand_index = 4
+    ax.annotate(
+        "Unsaturated (Dry)", xy=(80, clay_index + 0.5), xytext=(200, clay_index + 1.2),
+        ha="left", va="center", fontsize=9,
+        arrowprops=dict(arrowstyle="->", color="black"),
+    )
+    ax.annotate(
+        "Saturated with\nSalt Water", xy=(6, sand_index + 0.5),
+        xytext=(2.5, sand_index), ha="right", va="center", fontsize=9,
+        arrowprops=dict(arrowstyle="->", color="black"),
+    )
+    ax.annotate(
+        "Unsaturated (Dry)", xy=(400, sand_index + 0.5),
+        xytext=(1000, sand_index + 1.2), ha="left", va="center", fontsize=9,
+        arrowprops=dict(arrowstyle="->", color="black"),
+    )
+
+    def full_number_formatter(value, _position):
+        return f"{value:.10f}".rstrip("0").rstrip(".")
+
+    ax.set_xticks([0.1, 1, 10, 100, 1000, 10000, 100000])
+    ax.xaxis.set_major_formatter(FuncFormatter(full_number_formatter))
+    ax.grid(True, which="both", axis="x", linestyle=":", linewidth=0.5)
+    return _fig_png(fig)
 
 
 def _stair(thicknesses, resistivities, bottom):
@@ -328,6 +395,7 @@ with st.expander("Bulk resistivity assumptions"):
     resistivity["Brackish saturated sand"] = col4.number_input("Brackish sand [Ohm.m]", 0.1, 1000.0, 16.0)
     resistivity["Saline saturated sand"] = col5.number_input("Saline sand [Ohm.m]", 0.1, 1000.0, 2.0)
     resistivity["Bedrock"] = col6.number_input("Bedrock [Ohm.m]", 1.0, 100000.0, 1000.0)
+    st.image(_build_resistivity_ranges_figure(is_mobile()), width="stretch")
 
 st.subheader(":blue-background[Survey systems and noise]", divider="blue")
 systems = st.multiselect(
