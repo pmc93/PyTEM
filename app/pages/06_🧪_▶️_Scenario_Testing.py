@@ -214,21 +214,17 @@ def _run_smooth_inversion(observed_t, noise_t, times_t, system_name,
             rx_offset=offset, times=times,
             hankel_filter="key_101", fourier_filter="key_81",
         ))
-    return predicted, inversion_thicknesses, recovered, result["rms_history"]
+    normalized_rms = float(np.sqrt(np.mean(((predicted - observed) / noise) ** 2)))
+    return predicted, inversion_thicknesses, recovered, normalized_rms, len(result["rms_history"])
 
 
 @st.cache_data(show_spinner=False)
-def _build_inversion_figure(times_t, observed_t, noise_t, predicted_t,
-                            true_thicknesses_t, true_rhos_t,
-                            inversion_thicknesses_t, recovered_t, max_depth, mobile):
+def _build_inversion_figure(times_t, noise_t, result_items_t,
+                            true_thicknesses_t, true_rhos_t, max_depth, mobile):
     times = np.asarray(times_t)
-    observed = np.asarray(observed_t)
     noise = np.asarray(noise_t)
-    predicted = np.asarray(predicted_t)
     true_thicknesses = np.asarray(true_thicknesses_t)
     true_rhos = np.asarray(true_rhos_t)
-    inversion_thicknesses = np.asarray(inversion_thicknesses_t)
-    recovered = np.asarray(recovered_t)
 
     if mobile:
         fig = Figure(figsize=(8, 12), constrained_layout=True)
@@ -237,10 +233,19 @@ def _build_inversion_figure(times_t, observed_t, noise_t, predicted_t,
         fig = Figure(figsize=(14, 6), constrained_layout=True)
         ax_data, ax_model = fig.subplots(1, 2)
 
-    ax_data.errorbar(times, observed, yerr=noise, fmt="o", color="black", ms=4,
-                     ecolor="0.65", capsize=2, label="Synthetic observations")
-    ax_data.loglog(times, predicted, color="steelblue", lw=2,
-                   label="Smooth-model prediction")
+    for name, observed_t, predicted_t, inversion_thicknesses_t, recovered_t in result_items_t:
+        observed = np.asarray(observed_t)
+        predicted = np.asarray(predicted_t)
+        inversion_thicknesses = np.asarray(inversion_thicknesses_t)
+        recovered = np.asarray(recovered_t)
+        line = ax_data.loglog(times, predicted, lw=2, label=f"{name}, predicted")[0]
+        ax_data.errorbar(times, observed, yerr=noise, fmt="o", color=line.get_color(),
+                         ms=3, ecolor=line.get_color(), alpha=0.55, capsize=1)
+        recovered_step, recovered_depth = _stair(
+            inversion_thicknesses, recovered, max_depth,
+        )
+        ax_model.semilogx(recovered_step, recovered_depth, color=line.get_color(),
+                          lw=2, label=name)
     ax_data.loglog(times, noise, "k--", lw=1.2, label="1-sigma noise floor")
     ax_data.set_xlabel("Time [s]")
     ax_data.set_ylabel(r"|dB/dt| [V/m$^2$]")
@@ -249,11 +254,8 @@ def _build_inversion_figure(times_t, observed_t, noise_t, predicted_t,
     ax_data.legend(fontsize=9)
 
     true_rho_step, true_depth_step = _stair(true_thicknesses, true_rhos, max_depth)
-    recovered_step, recovered_depth = _stair(inversion_thicknesses, recovered, max_depth)
     ax_model.semilogx(true_rho_step, true_depth_step, "k--", lw=2,
                       label="True layered model")
-    ax_model.semilogx(recovered_step, recovered_depth, color="darkorange", lw=2,
-                      label="Recovered smooth model")
     ax_model.set_ylim(max_depth, 0.0)
     ax_model.set_xlabel("Resistivity [Ohm.m]")
     ax_model.set_ylabel("Depth [m]")
@@ -269,6 +271,10 @@ st.markdown(
     "offset, and instrument noise affect a synthetic TEM sounding. Later "
     "detectable gates generally indicate greater depth sensitivity, but they "
     "are not a formal depth-of-investigation estimate."
+)
+st.caption(
+    "Acknowledgement: Thanks to Fritz Kalwa at TU Dresden for the motivation "
+    "and discussions that helped shape the cases presented here."
 )
 
 scenario = st.selectbox("Hydrogeological scenario", SCENARIOS)
@@ -365,12 +371,11 @@ st.caption(
 
 st.subheader(":violet-background[Smooth inversion]", divider="violet")
 st.markdown(
-    "Invert one synthetic sounding on a fixed 20-layer depth grid. The recovered "
-    "model is deliberately smooth, so thin aquifers and sharp water-quality "
-    "interfaces may appear broadened or suppressed."
+    "Invert every selected system on the same fixed 20-layer depth grid. The "
+    "recovered models are deliberately smooth, so thin aquifers and sharp "
+    "water-quality interfaces may appear broadened or suppressed."
 )
-col_system, col_start, col_depth = st.columns(3)
-inversion_system = col_system.selectbox("System to invert", systems)
+col_start, col_depth = st.columns(2)
 start_rho = col_start.number_input(
     "Starting resistivity [Ohm.m]", 1.0, 5000.0, 100.0, 10.0,
 )
@@ -379,32 +384,47 @@ max_depth = col_depth.number_input(
 )
 
 inversion_signature = (
-    scenario, tuple(thicknesses), tuple(rhos), inversion_system, tuple(times),
-    tuple(noisy[inversion_system]), tuple(noise), start_rho, max_depth,
+    scenario, tuple(thicknesses), tuple(rhos), tuple(systems), tuple(times),
+    tuple((name, tuple(noisy[name])) for name in systems),
+    tuple(noise), start_rho, max_depth,
 )
-if st.button("Run smooth inversion", type="primary"):
-    with st.spinner("Running regularized smooth inversion..."):
-        inversion_result = _run_smooth_inversion(
-            tuple(noisy[inversion_system]), tuple(noise), tuple(times),
-            inversion_system, start_rho, max_depth,
+if st.button("Invert all selected systems", type="primary"):
+    inversion_results = []
+    with st.spinner("Running regularized smooth inversions..."):
+        for system_name in systems:
+            result = _run_smooth_inversion(
+                tuple(noisy[system_name]), tuple(noise), tuple(times),
+                system_name, start_rho, max_depth,
+            )
+            inversion_results.append((system_name, result))
+        st.session_state["scenario_inversion"] = (
+            inversion_signature, tuple(inversion_results),
         )
-        st.session_state["scenario_inversion"] = (inversion_signature, inversion_result)
 
 stored_inversion = st.session_state.get("scenario_inversion")
 if stored_inversion is not None and stored_inversion[0] == inversion_signature:
-    predicted, inversion_thicknesses, recovered, rms_history = stored_inversion[1]
-    col_rms, col_iterations = st.columns(2)
-    col_rms.metric(
-        "Final normalized RMS", f"{rms_history[-1]:.3f}" if len(rms_history) else "-",
+    inversion_results = stored_inversion[1]
+    metric_columns = st.columns(min(len(inversion_results), 3))
+    result_items = []
+    for index, (system_name, result) in enumerate(inversion_results):
+        predicted, inversion_thicknesses, recovered, normalized_rms, iterations = result
+        metric_columns[index % len(metric_columns)].metric(
+            system_name, f"RMS {normalized_rms:.2f}", help=f"{iterations} iterations",
+        )
+        result_items.append((
+            system_name, tuple(noisy[system_name]), tuple(predicted),
+            tuple(inversion_thicknesses), tuple(recovered),
+        ))
+    st.caption(
+        "Weighted RMS = sqrt(mean(((predicted - observed) / sigma)^2)); "
+        "a value near 1 indicates a fit consistent with the specified noise."
     )
-    col_iterations.metric("Iterations", len(rms_history))
     inversion_figure = _build_inversion_figure(
-        tuple(times), tuple(noisy[inversion_system]), tuple(noise), tuple(predicted),
-        tuple(thicknesses), tuple(rhos), tuple(inversion_thicknesses), tuple(recovered),
-        max_depth, is_mobile(),
+        tuple(times), tuple(noise), tuple(result_items), tuple(thicknesses),
+        tuple(rhos), max_depth, is_mobile(),
     )
     st.image(inversion_figure, width="stretch")
 else:
-    st.info("Choose a system and press **Run smooth inversion**.")
+    st.info("Press **Invert all selected systems** to compare their recovered models.")
 
 render_footer()
