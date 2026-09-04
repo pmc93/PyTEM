@@ -116,7 +116,7 @@ with col1:
 """, unsafe_allow_html=True)
 
     with open(os.path.join(_APP_DIR, "data", "TEM.png"), "rb") as _f:
-        st.image(_f.read(), use_container_width=True)
+        st.image(_f.read(), width="stretch")
    
 
 with col2:
@@ -136,7 +136,7 @@ with col2:
 """, unsafe_allow_html=True)
 
     with open(os.path.join(_APP_DIR, "data", "VES.png"), "rb") as _f:
-        st.image(_f.read(), use_container_width=True)
+        st.image(_f.read(), width="stretch")
    
 
 st.divider()
