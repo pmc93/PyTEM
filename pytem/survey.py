@@ -73,7 +73,8 @@ class Survey:
     # ------------------------------------------------------------------
     # Soundings
     # ------------------------------------------------------------------
-    def plot_soundings(self, moments=None, ax=None, figsize=(6, 5), show_mean=True):
+    def plot_soundings(self, moments=None, ax=None, figsize=(6, 5), show_mean=True,
+                      station_mask=None):
         """Raw |dB/dt| decay curves for one or more moments.
 
         LM and HM (if both requested) are drawn as two separately-coloured
@@ -81,15 +82,19 @@ class Survey:
 
         Parameters
         ----------
-        moments   : list of 'LM'/'HM', or None for all moments in the file.
-        ax        : existing Axes, or None to create a new figure.
-        show_mean : also draw the stacked mean per moment (bold line).
+        moments      : list of 'LM'/'HM', or None for all moments in the file.
+        ax           : existing Axes, or None to create a new figure.
+        show_mean    : also draw the stacked mean per moment (bold line).
+        station_mask : boolean array or integer index array selecting which
+                       stations (rows) to plot, or None for all stations.
         """
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
         for m in (moments or self.moments):
             t = self.tem.gate_times[m]["center"]
             dbdt = self.tem.dbdt(m)
+            if station_mask is not None:
+                dbdt = dbdt[station_mask]
             color = MOMENT_COLOR.get(m)
             for row in dbdt:
                 ax.loglog(t, np.abs(row), color=color, lw=0.4, alpha=0.15)
@@ -108,8 +113,9 @@ class Survey:
     # ------------------------------------------------------------------
     # Transects
     # ------------------------------------------------------------------
-    def plot_transects(self, moment, gates=None, n_gates=3, axes=None, figsize=(7, 7)):
-        """Signal vs. distance-along-line, one subplot per transect line.
+    def plot_transects(self, moment, gates=None, n_gates=3, axes=None, figsize=(7, 7),
+                       x_axis='distance', bad_mask=None, legend=True):
+        """Signal vs. distance-along-line (or station index), one subplot per line.
 
         Parameters
         ----------
@@ -118,6 +124,11 @@ class Survey:
                  ``n_gates`` evenly-spaced gates.
         n_gates : number of auto-picked gates when ``gates`` is None.
         axes    : existing array of Axes (one per line), or None to create them.
+        x_axis  : 'distance' (default, cumulative distance along the line
+                 [m]) or 'index' (station order within the line, 0-based).
+        bad_mask : (n_stations, n_gates) boolean array (True = bad/excluded
+                 data), or None. Bad points are circled in black.
+        legend  : whether to draw the per-gate-time legend on each subplot.
         """
         m = moment.upper()
         lines = self.tem.lines()
@@ -128,19 +139,25 @@ class Survey:
 
         if axes is None:
             _, axes = plt.subplots(len(lines), 1, figsize=figsize, sharey=True)
-            axes = np.atleast_1d(axes)
+        axes = np.atleast_1d(axes)
 
         for ax, line, color in zip(axes, lines, LINE_COLORS):
             mask = self.tem.line_mask(line)
-            dist = self.tem.distance_along_line(line)
+            x = np.arange(mask.sum()) if x_axis == 'index' else self.tem.distance_along_line(line)
             for g in gates:
                 vals = np.abs(dbdt[mask, g])
-                ax.semilogy(dist, vals, 'o-', ms=4, lw=1.4, alpha=0.85,
+                ax.semilogy(x, vals, 'o-', ms=4, lw=1.4, alpha=0.85,
                            label=f't = {t[g] * 1e6:.0f} \u00b5s')
-            ax.set_xlabel('Distance along line [m]')
+                if bad_mask is not None:
+                    bad = bad_mask[mask, g]
+                    if np.any(bad):
+                        ax.scatter(x[bad], vals[bad], s=110, facecolors='none',
+                                  edgecolors='k', linewidths=1.3, zorder=5)
+            ax.set_xlabel('Station index' if x_axis == 'index' else 'Distance along line [m]')
             ax.set_title(f'Line {line}')
             ax.grid(True, which='both', ls=':', alpha=0.5)
-            ax.legend(fontsize=8)
+            if legend:
+                ax.legend(fontsize=8)
         axes[0].set_ylabel(f'|dB/dt| ({m})')
         return axes
 
@@ -171,19 +188,17 @@ class Survey:
             mask = self.tem.line_mask(line)
             ax.scatter(e[mask], n[mask], c=LINE_COLORS[i % len(LINE_COLORS)], s=50,
                       label=f'Line {line}', zorder=4, edgecolors='k', linewidths=0.5)
+        ax.set_aspect('equal')  # UTM meters: equal x/y scale so distances aren't distorted
 
         if basemap:
             try:
                 import contextily as ctx
                 source = provider if provider is not None else ctx.providers.OpenTopoMap
                 ctx.add_basemap(ax, crs=f'EPSG:{epsg}', source=source, zoom='auto')
-                ax.set_title('Survey station map')
             except Exception as exc:
-                ax.set_title('Survey station map (basemap unavailable)')
                 ax.set_facecolor('#e8e8e8')
                 ax.grid(True, ls=':', alpha=0.5)
         else:
-            ax.set_title('Survey station map')
             ax.grid(True, ls=':', alpha=0.5)
 
         ax.set_xlabel(f'Easting [m] (EPSG:{epsg})')

@@ -55,7 +55,7 @@ def plot_model(thicknesses, resistivities, ax=None, figsize=(4, 4),
 
     thicknesses = np.asarray(thicknesses)
     resistivities = np.asarray(resistivities)
-    depths = np.concatenate(([0], np.cumsum(thicknesses[:-1])))
+    depths = np.concatenate(([0], np.cumsum(thicknesses)))
     y = np.r_[depths, depths[-1] + depth_pad]
     x = np.r_[resistivities, resistivities[-1]]
 
@@ -67,7 +67,8 @@ def plot_model(thicknesses, resistivities, ax=None, figsize=(4, 4),
     ax.set_title(title)
     if xlim is not None:
         ax.set_xlim(xlim)
-    ax.legend()
+    if label is not None:
+        ax.legend()
     return ax
 
 

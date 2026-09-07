@@ -22,7 +22,9 @@ moment (see ``pytem.setup_waveform_matrix``) and solves for a shared model.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -611,3 +613,324 @@ def read_xyz(path: str):
             if line:
                 return read_kenbec_xyz(path) if line.startswith("/") else read_tem_xyz(path)
     raise ValueError(f"Empty file: {path!r}")
+
+
+@dataclass
+class TunoeTEMData(_PositionMixin):
+    """Container for a set of parsed TEMcompany `.usf` sounding files (one per station).
+
+    Usage
+    -----
+        tem = read_usf(r"...\\USF_Files_Tunoe")
+        tem.gate_times["HM"]["center"]        # -> np.ndarray [s]
+        tem.data                              # -> pandas DataFrame, one row per sounding
+
+        surv = Survey(tem)
+        surv.plot_soundings(); surv.plot_map()
+    """
+
+    meta: dict = field(default_factory=dict)
+    waveforms: dict = field(default_factory=dict)   # {"LM": {"time":.., "amplitude":..}, "HM": {...}}
+    gate_times: dict = field(default_factory=dict)   # {"LM": {"open":.., "center":.., "close":..}, "HM": {..}}
+    data: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    def dbdt(self, moment: str) -> np.ndarray:
+        """Station x gate dB/dt matrix [V/(A*m^2)] for 'LM' or 'HM'."""
+        m = moment.upper()
+        n = len(self.gate_times[m]["center"])
+        cols = [f"{m}gate{i:03d}" for i in range(1, n + 1)]
+        return self.data[cols].to_numpy(dtype=float)
+
+    def dbdt_std(self, moment: str) -> np.ndarray:
+        """Station x gate fractional uncertainty (stack SEM / |mean|) for 'LM' or 'HM'."""
+        m = moment.upper()
+        n = len(self.gate_times[m]["center"])
+        cols = [f"{m}std{i:03d}" for i in range(1, n + 1)]
+        return self.data[cols].to_numpy(dtype=float)
+
+    def snr(self, moment: str):
+        """Per-gate SNR from the scatter across stations.
+
+        Returns (times, mean, sem, snr).
+        """
+        t = self.gate_times[moment.upper()]["center"]
+        d = self.dbdt(moment)
+        n_eff = np.sum(np.isfinite(d), axis=0)
+        mean = np.nanmean(d, axis=0)
+        sem = np.nanstd(d, axis=0) / np.sqrt(np.maximum(n_eff, 1))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            snr = np.abs(mean) / sem
+        return t, mean, sem, snr
+
+    def to_pytem(self, moment: str, station=None, min_noise=0.03, peak_current=None):
+        """
+        Convert one moment ('LM' or 'HM') into kwargs for pyTEM.
+
+        Data unit conversion
+        --------------------
+        The `.usf` header declares ``VOLTAGE_UNITS: V/AM2``: the stored
+        dB/dt is the raw receiver voltage already normalised by the Tx
+        current alone (the Rx effective area is an instrument calibration
+        folded in beforehand), i.e. ``data [V/(A*m^2)] = dBz/dt [V/m^2] /
+        I``. This is the simplest reading of the header and has *not* been
+        cross-checked against an independent calibration source -- treat
+        absolute recovered resistivities with that caveat.
+
+            obs_scaled = data * I_peak = dBz/dt_true [V/m^2]
+            wf_I = amplitude * I_peak * N_tx           [A-turns]
+
+        Parameters
+        ----------
+        moment     : 'LM' or 'HM'
+        station    : int index or None (stack mean over all stations)
+        min_noise  : fractional noise floor (default 0.03)
+        peak_current : override the Tx current [A]; defaults to the
+                       measured mean ``/CURRENT`` for this moment.
+
+        Returns
+        -------
+        dict  with keys: times, obs_data, noise_std, waveform_times,
+              waveform_currents, geometry, tx_size, rx_x, rx_y,
+              plus context keys: gate_open, gate_close, tx_turns,
+              n_stations.
+        """
+        m = moment.upper()
+        gt = self.gate_times[m]
+        times = gt["center"]
+
+        dbdt = self.dbdt(m)
+        frac = self.dbdt_std(m)
+        current_col = f"{m}current"
+
+        if station is not None:
+            obs = dbdt[station]
+            noise_frac = frac[station]
+            measured_current = float(self.data[current_col].iloc[station])
+            n_stations = 1
+        else:
+            obs = np.nanmean(dbdt, axis=0)
+            n_eff = np.sum(np.isfinite(dbdt), axis=0)
+            sem = np.nanstd(dbdt, axis=0) / np.sqrt(np.maximum(n_eff, 1))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                noise_frac = sem / np.abs(obs)
+            measured_current = float(self.data[current_col].mean())
+            n_stations = int(self.data.shape[0])
+
+        noise_std = np.clip(np.nan_to_num(noise_frac, nan=min_noise), min_noise, None)
+
+        # ---- Geometry -------------------------------------------------------
+        tx_side = float(self.meta.get("LoopX", 3.0))
+        tx_turns = int(float(self.meta.get("LoopTurns", 1)))
+        rx_x = float(self.meta.get("RXcoil_X_Position", -13.0))
+        rx_y = float(self.meta.get("RXcoil_Y_Position", 0.0))
+        geometry = "square_offset" if (abs(rx_x) > 1e-6 or abs(rx_y) > 1e-6) else "square_central"
+
+        if peak_current is None:
+            peak_current = measured_current
+
+        obs = np.abs(obs) * peak_current   # [V/m^2]
+
+        wf_t = self.waveforms[m]["time"]
+        wf_I = self.waveforms[m]["amplitude"] * peak_current * tx_turns   # [A-turns]
+
+        return {
+            "times": times,
+            "obs_data": obs,
+            "noise_std": noise_std,
+            "waveform_times": wf_t,
+            "waveform_currents": wf_I,
+            "geometry": geometry,
+            "tx_size": tx_side,
+            "rx_x": rx_x,
+            "rx_y": rx_y,
+            # context
+            "gate_open": gt.get("open"),
+            "gate_close": gt.get("close"),
+            "tx_turns": tx_turns,
+            "n_stations": n_stations,
+        }
+
+
+def _read_usf_sounding(path):
+    """Parse one TEMcompany `.usf` sounding file into header metadata + raw per-sweep channel data."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+
+
+    meta = {}
+    i, n = 0, len(lines)
+    while i < n and not lines[i].startswith("/SWEEP_NUMBER"):
+        line = lines[i].strip()
+        if line.startswith("/DATE:"):
+            meta["date"] = line.split(":", 1)[1].strip()
+        elif line.startswith("/SOUNDING_NAME:"):
+            meta["sounding_name"] = line.split(":", 1)[1].strip()
+        elif line.startswith("/SWEEPS:"):
+            meta["n_sweeps"] = int(line.split(":", 1)[1])
+        elif line.startswith("/LOOP_SIZE:"):
+            meta["loop_size"] = tuple(float(v) for v in line.split(":", 1)[1].split(","))
+        elif line.startswith("/LOCATION:"):
+            meta["location"] = tuple(float(v) for v in line.split(":", 1)[1].split(","))
+        elif line.startswith("/COIL_LOCATION:"):
+            meta["coil_location"] = tuple(float(v) for v in line.split(":", 1)[1].split(","))
+        i += 1
+
+    # channel_id -> {"time", "gate_open", "gate_close", "volts": [sweep][gate],
+    #                "currents": [], "frequencies": [], "ramp_time", "ramp_amp"}
+    channels = {}
+    current = frequency = channel = None
+    ramp_time = ramp_amp = None
+    in_table = False
+    time_list = gopen_list = gclose_list = volt_row = None
+    for line in lines[i:]:
+        s = line.strip()
+        if s.startswith("/CURRENT:"):
+            current = float(s.split(":", 1)[1])
+        elif s.startswith("/FREQUENCY:"):
+            frequency = float(s.split(":", 1)[1])
+        elif s.startswith("/TX_RAMP:"):
+            vals = _floats(s.split(":", 1)[1].replace(",", " "))
+            ramp_time, ramp_amp = vals[0::2], vals[1::2]
+        elif s.startswith("/CHANNEL:"):
+            channel = int(s.split(":", 1)[1])
+        elif s.startswith("TIME,"):
+            in_table = True
+            time_list, gopen_list, gclose_list, volt_row = [], [], [], []
+        elif in_table:
+            if s.startswith("/END"):
+                in_table = False
+                ch = channels.setdefault(channel, {"time": time_list, "gate_open": gopen_list,
+                                                     "gate_close": gclose_list, "volts": [],
+                                                     "currents": [], "frequencies": [],
+                                                     "ramp_time": ramp_time, "ramp_amp": ramp_amp})
+                ch["volts"].append(volt_row)
+                ch["currents"].append(current)
+                ch["frequencies"].append(frequency)
+            elif s:
+                t, v, _err, _q, topen, tclose = (float(x) for x in s.split(","))
+                time_list.append(t)
+                gopen_list.append(topen)
+                gclose_list.append(tclose)
+                volt_row.append(v)
+    return meta, channels
+
+
+_NOTES_LINE_RE = re.compile(
+    r'\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+"([^"]*)"\s+"([^"]*)"\s*$')
+
+
+def _read_usf_notes(folder) -> dict:
+    """Parse the optional ``Notes_*.txt`` field-log next to the .usf files.
+
+    Maps ``(LineNo, StationNo)`` (as the zero-padded strings used in the
+    filenames, e.g. ``('001', '016')``) to the free-text ``UserNote`` field
+    (e.g. proximity to a tractor or a shed/water pipe noise source).
+    """
+    notes = {}
+    for path in Path(folder).glob("Notes_*.txt"):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            next(fh, None)  # header line
+            for line in fh:
+                m = _NOTES_LINE_RE.match(line)
+                if m:
+                    notes[(m.group(3), m.group(4))] = m.group(7).strip()
+    return notes
+
+
+def read_usf(folder: str) -> TunoeTEMData:
+    """
+    Read every TEMcompany `.usf` sounding file in `folder` into one dataset.
+
+    Each `.usf` file holds one station/sounding: a header (Tx loop size, Rx
+    coil offset, lon/lat) followed by many repeated sweeps split into a
+    fast/low-moment (LM) and a slow/high-moment (HM) channel, identified
+    here by frequency (highest = LM) rather than by the raw channel number,
+    since that is robust to files with a different channel ordering or a
+    single moment. The repeated sweeps of each channel are the stacks and
+    are averaged here into one dB/dt curve + standard error per moment,
+    stored in the same gate-column layout as :class:`KenbecTEMData` so the
+    shared ``dbdt``/``snr``/:class:`~pytem.survey.Survey` machinery applies
+    unchanged.
+
+    Parameters
+    ----------
+    folder : str
+        Directory containing the `.usf` files (one per station). A sibling
+    ``Notes_*.txt`` field-log, if present, is parsed too and its
+    ``UserNote`` per station attached as the ``UserNote`` column.
+
+    Returns
+    -------
+    TunoeTEMData
+    """
+    paths = sorted(Path(folder).glob("*.usf"))
+    if not paths:
+        raise ValueError(f"No .usf files found in {folder!r}")
+
+    notes = _read_usf_notes(folder)
+
+    tem = TunoeTEMData()
+    rows = []
+    gate_times: dict = {}
+    waveforms: dict = {}
+
+    for path in paths:
+        meta, channels = _read_usf_sounding(path)
+        by_freq = sorted(channels.items(), key=lambda kv: -np.mean(kv[1]["frequencies"]))
+        names = ["LM", "HM"][:len(by_freq)]
+
+        # Filenames are "L<line>_S<station>_<timestamp>.usf", matching the
+        # LineNo/StationNo columns of Notes_*.txt.
+        parts = path.stem.split("_")
+        line_no = parts[0][1:] if parts and parts[0].startswith("L") else "1"
+        station_no = parts[1][1:] if len(parts) > 1 and parts[1].startswith("S") else "0"
+
+        lon, lat, elev = meta["location"]
+        row = {
+            "SoundingName": meta.get("sounding_name"),
+            "Line": line_no,
+            "StationNo": station_no,
+            "UserNote": notes.get((line_no, station_no), ""),
+            "Date": meta.get("date"),
+            "Longitude": lon, "Latitude": lat, "Elevation": elev,
+            "NSweeps": meta.get("n_sweeps"),
+        }
+
+        for name, (_cid, ch) in zip(names, by_freq):
+            volts = np.asarray(ch["volts"], dtype=float)
+            n_stacks = volts.shape[0]
+            mean = volts.mean(axis=0)
+            sem = volts.std(axis=0, ddof=1) / np.sqrt(n_stacks) if n_stacks > 1 else np.zeros_like(mean)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                frac = sem / np.abs(mean)
+            for g in range(mean.size):
+                row[f"{name}gate{g + 1:03d}"] = mean[g]
+                row[f"{name}std{g + 1:03d}"] = frac[g]
+            row[f"{name}current"] = float(np.mean(ch["currents"]))
+            row[f"{name}nstacks"] = n_stacks
+
+            if name not in gate_times:
+                gate_times[name] = {
+                    "center": np.asarray(ch["time"], dtype=float),
+                    "open": np.asarray(ch["gate_open"], dtype=float),
+                    "close": np.asarray(ch["gate_close"], dtype=float),
+                }
+                waveforms[name] = {
+                    "time": np.asarray(ch["ramp_time"], dtype=float),
+                    "amplitude": np.asarray(ch["ramp_amp"], dtype=float),
+                }
+
+        if not tem.meta:
+            tem.meta = {
+                "LoopX": meta["loop_size"][0], "LoopY": meta["loop_size"][1],
+                "RXcoil_X_Position": meta["coil_location"][0],
+                "RXcoil_Y_Position": meta["coil_location"][1],
+                "LoopTurns": 1,
+            }
+
+        rows.append(row)
+
+    tem.data = pd.DataFrame(rows)
+    tem.gate_times = gate_times
+    tem.waveforms = waveforms
+    return tem

@@ -555,3 +555,58 @@ def setup_waveform_matrix(gate_times, waveform_times, waveform_currents,
 
     apply_waveform.matrix = M
     return t_step, apply_waveform
+
+
+def setup_shared_gate_matrices(systems, n_step=300, n_dense_gate=400,
+                               n_per_segment=81, pad_decades=1.0):
+    """Build one shared step-time grid and gate-averaging matrix per dataset.
+
+    Convenience wrapper around :func:`setup_waveform_matrix` for the common
+    case of several datasets (e.g. LM + HM moments for one station) that
+    must share one step-response time grid so their gate matrices can be
+    combined in a joint inversion (see ``pytem.invert_joint``). Built once
+    and reused for every station, since it only depends on the gate timing,
+    waveform and geometry, not on the earth model or the measured data.
+
+    Parameters
+    ----------
+    systems : dict of {name: kwargs}
+        Each kwargs dict must have 'times' (gate centre times), 'gate_open',
+        'gate_close', 'waveform_times', 'waveform_currents' -- e.g. the
+        output of a data-io ``to_pytem()`` call, one per moment/dataset.
+    n_step        : step-response grid size.
+    n_dense_gate  : internal quadrature for the gate-averaging matrix.
+    n_per_segment : quintic B-spline waveform kernel points per segment.
+    pad_decades   : log10 decades of padding below/above the observed delay range.
+
+    Returns
+    -------
+    t_step   : (n_step,) shared step-response time grid [s].
+    matrices : dict of {name: (n_gates, n_step) gate-averaging matrix}, in
+              the same key order as ``systems``.
+    """
+    delay_sets = []
+    for kw in systems.values():
+        waveform_times = np.asarray(kw['waveform_times'], dtype=float)
+        waveform_currents = np.asarray(kw['waveform_currents'], dtype=float)
+        active = np.flatnonzero(np.diff(waveform_currents) != 0.0)
+        segment_endpoints = np.unique(np.concatenate([waveform_times[active], waveform_times[active + 1]]))
+        output_times = np.concatenate([kw['times'], kw['gate_open'], kw['gate_close']])
+        delays = output_times[:, None] - segment_endpoints[None, :]
+        delay_sets.append(delays[delays > 0.0])
+
+    positive_delays = np.concatenate(delay_sets)
+    t_step = np.logspace(
+        np.log10(positive_delays.min()) - pad_decades,
+        np.log10(positive_delays.max()) + pad_decades,
+        n_step)
+
+    matrices = {}
+    for name, kw in systems.items():
+        _, apply_gate = setup_waveform_matrix(
+            kw['times'], kw['waveform_times'], kw['waveform_currents'],
+            gate_open=kw['gate_open'], gate_close=kw['gate_close'],
+            t_step=t_step, n_per_segment=n_per_segment, n_dense_gate=n_dense_gate)
+        matrices[name] = apply_gate.matrix
+
+    return t_step, matrices

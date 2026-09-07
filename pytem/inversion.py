@@ -729,7 +729,7 @@ def _backtrack(m, delta, ln_rho_min, ln_rho_max):
 def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                   thicknesses, fwd_fn, obs_data, w,
                   ln_rho_min, ln_rho_max, alpha_step=1/9, rms_current=np.inf,
-                  plot=False):
+                  plot=False, verbose=True):
     """Log-spaced alpha search with parabola backtrack to RMS = 1.
 
     Tests ``alpha_steps`` regularisation strengths starting from
@@ -756,6 +756,7 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                               the 'RMS increased' early stop only fires once
                               at least one alpha has improved on this value
     plot         : bool       show alpha-RMS diagnostic figure (default False)
+    verbose      : bool       print the per-alpha RMS trace (default True)
 
     Returns
     -------
@@ -775,19 +776,22 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
         valid = (obs_data > 0) & (mod > 0)
         d_res = np.log(obs_data[valid]) - np.log(mod[valid])
         rms   = np.sqrt(np.mean((w[valid] * d_res) ** 2))
-        print(f"    Alpha = {alpha:.2f},  RMS = {rms:.2f}"
-              + (f"  (step = {step:.2f})" if step < 1.0 else ""))
+        if verbose:
+            print(f"    Alpha = {alpha:.2f},  RMS = {rms:.2f}"
+                  + (f"  (step = {step:.2f})" if step < 1.0 else ""))
         alpha_hist.append(alpha)
         rms_hist.append(rms)
         delta_hist.append(trial - m)
         mod_hist.append(mod)
 
         if rms < 1.0:
-            print("    RMS below 1 - stopping for parabola fit.")
+            if verbose:
+                print("    RMS below 1 - stopping for parabola fit.")
             break
 
         if len(rms_hist) > 1 and rms > rms_hist[-2] and min(rms_hist[:-1]) < rms_current:
-            print("    RMS increased - stopping alpha search early.")
+            if verbose:
+                print("    RMS increased - stopping alpha search early.")
             break
 
     # Polynomial backtrack to find alpha* where RMS = 1 (only when below 1 is reached)
@@ -816,9 +820,10 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
             valid_par      = (obs_data > 0) & (mod_par > 0)
             d_par          = np.log(obs_data[valid_par]) - np.log(mod_par[valid_par])
             rms_par        = np.sqrt(np.mean((w[valid_par] * d_par) ** 2))
-            print(f"    Fitted Alpha = {parabola_alpha:.3f}"
-                  f", Actual RMS = {rms_par:.3f}"
-                  + (f"  (step = {step_par:.2f})" if step_par < 1.0 else ""))
+            if verbose:
+                print(f"    Fitted Alpha = {parabola_alpha:.3f}"
+                      f", Actual RMS = {rms_par:.3f}"
+                      + (f"  (step = {step_par:.2f})" if step_par < 1.0 else ""))
             alpha_hist.append(parabola_alpha)
             rms_hist.append(rms_par)
             delta_hist.append(trial_par - m)
@@ -1287,4 +1292,140 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
         'obs_data':          obs_data,
         'n_iter':            len(rms_history),
     }
+
+
+def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
+                 rx_x=0.0, rx_y=0.0, rho_min=0.1, rho_max=1e5,
+                 alpha_steps=5, alpha_step=1 / 9, maxit=15, n_quad=5,
+                 use_numba=True, use_cuda=False, transform='dlf', verbose=True):
+    """
+    Joint Gauss-Newton inversion of one or more pre-gated datasets (e.g. a
+    station's LM and HM soundings) sharing one layered-earth model.
+
+    Unlike ``invert()``, which convolves the waveform at instantaneous gate
+    centre times (``waveform.setup_waveform``), this accepts one or more
+    precomputed gate-averaging matrices from ``setup_waveform_matrix`` (its
+    ``.matrix`` attribute) -- so both the transmitter waveform *and* the
+    finite receiver gate width are accounted for. This matters most for
+    early-time gates, where the gate width is a large fraction of the gate
+    centre time.
+
+    All ``fit_systems`` matrices must be built on the same ``t_step`` step-
+    time grid (build it once and reuse for every dataset/station -- see
+    ``setup_waveform_matrix``).
+
+    Parameters
+    ----------
+    fit_systems : list of dict, each with keys
+        'M'     : (n_gates, n_step) gate-averaging matrix for this dataset
+        'obs'   : (n_gates,) observed data, positive
+        'noise' : (n_gates,) absolute noise standard deviation
+    thicknesses : (N-1,) layer thicknesses [m]
+    rho_start   : (N,) initial resistivities [Ohm.m]
+    t_step      : (n_step,) shared step-response time grid used to build
+                 every ``M`` matrix in ``fit_systems``
+    tx_size, geometry, rx_x, rx_y : forward-model geometry, as in
+                 ``fwd_circle_offset`` / ``fwd_square_offset``
+    rho_min, rho_max : resistivity bounds [Ohm.m]
+    alpha_steps, alpha_step, maxit : Gauss-Newton / alpha-search controls
+    n_quad      : square-loop quadrature order (ignored for circle geometries)
+    use_numba, use_cuda : backend flags
+    transform   : 'dlf' or 'euler'
+    verbose     : print the per-iteration alpha-search trace (default True).
+                 Set to False for clean output when running many stations in
+                 parallel (e.g. from multiple threads), since the printed
+                 trace is not thread-safe to redirect/capture per call.
+
+    Returns
+    -------
+    dict with keys:
+        'resistivities', 'log_resistivities' : final model
+        'rms'          : final weighted log-RMS misfit
+        'n_iter'       : number of Gauss-Newton iterations taken
+        'converged'    : bool, True if rms <= 1.0 was reached
+        'observed'     : (n_d,) concatenated observed data (all fit_systems, in order)
+        'predicted'    : (n_d,) concatenated final modelled data, same order/shape as 'observed'
+        'n_gates'      : list of int, number of gates contributed by each fit_systems entry
+    """
+    thicknesses = np.asarray(thicknesses, dtype=float)
+    t_step = np.asarray(t_step, dtype=float)
+    observed = np.concatenate([np.asarray(f['obs'], dtype=float) for f in fit_systems])
+    noise_abs = np.concatenate([np.asarray(f['noise'], dtype=float) for f in fit_systems])
+    weights = observed / noise_abs
+
+    def fwd_step(rho):
+        if geometry == 'square_offset':
+            return -fwd_square_offset(thicknesses, rho, tx_size, rx_x, rx_y, t_step,
+                                      current=1.0, signal=-1, n_quad=n_quad,
+                                      use_numba=use_numba, use_cuda=use_cuda,
+                                      transform=transform)
+        return -fwd_circle_offset(thicknesses, rho, tx_size, rx_x, t_step,
+                                  current=1.0, signal=-1,
+                                  use_numba=use_numba, use_cuda=use_cuda,
+                                  transform=transform)
+
+    def predict(log_rho):
+        step = fwd_step(np.exp(log_rho))
+        return np.concatenate([f['M'] @ step for f in fit_systems])
+
+    def weighted_log_rms(pred):
+        residual = np.log(observed) - np.log(np.maximum(pred, 1e-300))
+        return np.sqrt(np.mean((weights * residual) ** 2)), residual
+
+    def jacobian(log_rho, pred):
+        jac_abs = getJ_ana(
+            thicknesses=thicknesses, log_resistivities=log_rho, tx_size=tx_size,
+            times=t_step, geometry=geometry, rx_x=rx_x, rx_y=rx_y, n_quad=n_quad,
+            use_numba=use_numba, use_cuda=use_cuda, transform=transform,
+            jacobian_mode='absolute')
+        gate_jac = np.vstack([f['M'] @ jac_abs for f in fit_systems])
+        result = np.zeros_like(gate_jac)
+        positive = pred > 0
+        result[positive] = gate_jac[positive] / pred[positive, None]
+        return result
+
+    lower, upper = np.log(float(rho_min)), np.log(float(rho_max))
+    model = np.log(np.asarray(rho_start, dtype=float))
+    roughness = getR(rho_start)
+    pred = predict(model)
+    rms, resid = weighted_log_rms(pred)
+    weighted_jac = jacobian(model, pred) * weights[:, None]
+    alpha = float(np.linalg.norm(weighted_jac.T @ (weights * resid), np.inf) + 1e-30)
+    converged = False
+
+    for n_iter in range(maxit):
+        pred = predict(model)
+        rms, resid = weighted_log_rms(pred)
+        if rms <= 1.0:
+            converged = True
+            break
+        weighted_jac = jacobian(model, pred) * weights[:, None]
+        alpha_h, rms_h, delta_h, _ = _alpha_search(
+            alpha, alpha_steps, weighted_jac, weights * resid, roughness, model,
+            thicknesses, predict, observed, weights, lower, upper,
+            alpha_step=alpha_step, rms_current=rms, plot=False, verbose=verbose)
+        rms_arr, alpha_arr = np.asarray(rms_h), np.asarray(alpha_h)
+        acceptable = np.flatnonzero(rms_arr <= 1.0)
+        best = (int(acceptable[np.argmax(alpha_arr[acceptable])])
+                if acceptable.size else int(np.argmin(rms_arr)))
+        if rms_h[best] >= rms:
+            break
+        model = np.clip(model + delta_h[best], lower, upper)
+        alpha = alpha_h[best] * 10.0 ** alpha_step
+    else:
+        n_iter = maxit
+
+    final_pred = predict(model)
+    final_rms, _ = weighted_log_rms(final_pred)
+    return {
+        'log_resistivities': model,
+        'resistivities': np.exp(model),
+        'rms': final_rms,
+        'n_iter': n_iter + 1,
+        'converged': converged or final_rms <= 1.0,
+        'observed': observed,
+        'predicted': final_pred,
+        'n_gates': [len(f['obs']) for f in fit_systems],
+    }
+
 

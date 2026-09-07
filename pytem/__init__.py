@@ -137,13 +137,14 @@ from .forward import (
     fwd_analytical_offset,
 )
 
-from .waveform import convolve_waveform, setup_waveform, setup_waveform_matrix
+from .waveform import convolve_waveform, setup_waveform, setup_waveform_matrix, setup_shared_gate_matrices
 from .system_filter import butterworth_filter, cascade_filter
 from .euler import euler_invert
 from .inversion import (getJ_ana, getJ_fd, getR, dbdt_to_apprho, getRMS,
-                        getAlpha, getAlphas, invert)
+                        getAlpha, getAlphas, invert, invert_joint)
 from .plotter import plot_sounding, plot_model, plot_inversion
-from .data_io import TEMData, KenbecTEMData, read_tem_xyz, read_kenbec_xyz, read_xyz
+from .data_io import (TEMData, KenbecTEMData, TunoeTEMData, read_tem_xyz, read_kenbec_xyz,
+                      read_xyz, read_usf)
 from .survey import Survey
 
 from .ip_models import (
@@ -174,6 +175,7 @@ __all__ = [
     'convolve_waveform',
     'setup_waveform',
     'setup_waveform_matrix',
+    'setup_shared_gate_matrices',
     'butterworth_filter',
     'cascade_filter',
     # IP models
@@ -194,6 +196,7 @@ __all__ = [
     'getAlpha',
     'getAlphas',
     'invert',
+    'invert_joint',
     # Plotting
     'plot_sounding',
     'plot_model',
@@ -201,8 +204,10 @@ __all__ = [
     # Field-data import & survey plotting
     'TEMData',
     'KenbecTEMData',
+    'TunoeTEMData',
     'read_tem_xyz',
     'read_kenbec_xyz',
     'read_xyz',
+    'read_usf',
     'Survey',
 ]
