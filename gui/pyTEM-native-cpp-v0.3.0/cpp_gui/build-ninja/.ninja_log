@@ -1,0 +1,26 @@
+# ninja log v7
+186	1984	8112859137942411	pytem-native-tests_autogen/timestamp	715ccf9d11ed9e56
+186	1984	8112859137942411	pytem-native-tests_autogen/mocs_compilation.cpp	715ccf9d11ed9e56
+186	1984	8112859137942411	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/pyTEM-native-cpp-v0.3.0/cpp_gui/build-ninja/pytem-native-tests_autogen/timestamp	715ccf9d11ed9e56
+186	1984	8112859137942411	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/pyTEM-native-cpp-v0.3.0/cpp_gui/build-ninja/pytem-native-tests_autogen/mocs_compilation.cpp	715ccf9d11ed9e56
+2035	4354	8112859146020515	CMakeFiles/pytem-native-tests.dir/pytem-native-tests_autogen/mocs_compilation.cpp.obj	927563137c7d3873
+4363	18626	8112859169294424	CMakeFiles/pytem-native-tests.dir/src/MatrixConvolution.cpp.obj	6f93e787602f43a3
+136	21742	8112859338659655	pytem-inversion-gui_autogen/timestamp	d87aea2009f74e05
+136	21742	8112859338659655	pytem-inversion-gui_autogen/mocs_compilation.cpp	d87aea2009f74e05
+136	21742	8112859338659655	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/pyTEM-native-cpp-v0.3.0/cpp_gui/build-ninja/pytem-inversion-gui_autogen/timestamp	d87aea2009f74e05
+136	21742	8112859338659655	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/pyTEM-native-cpp-v0.3.0/cpp_gui/build-ninja/pytem-inversion-gui_autogen/mocs_compilation.cpp	d87aea2009f74e05
+2812	28575	8112859153734647	CMakeFiles/pytem-native-tests.dir/src/JacobianCache.cpp.obj	2e5c005467a3a22d
+21816	46247	8112859343754561	CMakeFiles/pytem-native-tests.dir/src/UsfReader.cpp.obj	7dbbb9e1d0d06e73
+2223	46577	8112859150682356	CMakeFiles/pytem-native-tests.dir/tests/native_tests.cpp.obj	21f28f0bc1b4a8ee
+18637	52455	8112859312106053	CMakeFiles/pytem-native-tests.dir/src/TemSolver.cpp.obj	c58ed40d7294aff8
+28582	53541	8112859411508498	CMakeFiles/pytem-inversion-gui.dir/pytem-inversion-gui_autogen/mocs_compilation.cpp.obj	4aaae111f6c74c59
+46256	61464	8112859588133422	CMakeFiles/pytem-inversion-gui.dir/src/main.cpp.obj	170c131dadd021ad
+53548	63414	8112859661083900	CMakeFiles/pytem-inversion-gui.dir/src/JacobianCache.cpp.obj	d69ce20d5949eccb
+52463	67551	8112859650330901	CMakeFiles/pytem-inversion-gui.dir/src/InversionWorker.cpp.obj	d289a725313a7864
+61477	67770	8112859740382056	CMakeFiles/pytem-inversion-gui.dir/src/MatrixConvolution.cpp.obj	e0c1d0ce6c3dc220
+63449	83791	8112859760552482	CMakeFiles/pytem-inversion-gui.dir/src/PlotWidget.cpp.obj	5e93949db68ed685
+83796	84728	8112859963494141	pytem-native-tests.exe	1fc15416a7f970a4
+67784	87531	8112859803562079	CMakeFiles/pytem-inversion-gui.dir/src/UsfReader.cpp.obj	710aaae487e47101
+67566	97806	8112859801381459	CMakeFiles/pytem-inversion-gui.dir/src/TemSolver.cpp.obj	7dace4bc8571d354
+46584	118374	8112859591369371	CMakeFiles/pytem-inversion-gui.dir/src/MainWindow.cpp.obj	c7c7422237b4248
+118385	120063	8112860309364292	pytem-inversion-gui.exe	961dc377c1ae675f

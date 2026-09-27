@@ -1,0 +1,59 @@
+# ninja log v7
+209	955	8121691100805151	invertem-native-tests_autogen/timestamp	dc3d611c3a32e83d
+209	955	8121691100805151	invertem-native-tests_autogen/mocs_compilation.cpp	dc3d611c3a32e83d
+221	759	8113793803374440	C:/Users/pamcl/Downloads/InverTEM-1.0.0/build-ninja/invertem-native-tests_autogen/timestamp	8a9ccf49c472c8e0
+221	759	8113793803374440	C:/Users/pamcl/Downloads/InverTEM-1.0.0/build-ninja/invertem-native-tests_autogen/mocs_compilation.cpp	8a9ccf49c472c8e0
+1277	1574	8121672664325601	CMakeFiles/invertem-native-tests.dir/invertem-native-tests_autogen/mocs_compilation.cpp.obj	38421ea93bf04d5d
+174	9465	8121691190669555	InverTEM_autogen/timestamp	d7545784609def45
+174	9465	8121691190669555	InverTEM_autogen/mocs_compilation.cpp	d7545784609def45
+186	6343	8113793862977020	C:/Users/pamcl/Downloads/InverTEM-1.0.0/build-ninja/InverTEM_autogen/timestamp	b268ad63f1c820a5
+186	6343	8113793862977020	C:/Users/pamcl/Downloads/InverTEM-1.0.0/build-ninja/InverTEM_autogen/mocs_compilation.cpp	b268ad63f1c820a5
+1379	6927	8121672665427864	CMakeFiles/invertem-native-tests.dir/src/JacobianCache.cpp.obj	bb14f3a1447a9323
+5758	9609	8121672709174491	CMakeFiles/invertem-native-tests.dir/src/MatrixConvolution.cpp.obj	59e281e8937f6f94
+962	10865	8121691108334436	CMakeFiles/invertem-native-tests.dir/tests/native_tests.cpp.obj	f1665c0c81d06e6a
+997	9543	8121691108711296	CMakeFiles/invertem-native-tests.dir/src/UsfReader.cpp.obj	5519cd65cbf557f8
+6929	19230	8121672720860177	CMakeFiles/invertem-native-tests.dir/src/TemSolver.cpp.obj	4f67bea2db453094
+9471	19025	8121691193473485	CMakeFiles/InverTEM.dir/InverTEM_autogen/mocs_compilation.cpp.obj	b2a0e8ef6bfafbdb
+9503	18692	8121691193871471	CMakeFiles/InverTEM.dir/src/main.cpp.obj	40cb5e1a6d24885c
+23064	29965	8121672882259871	CMakeFiles/InverTEM.dir/src/InversionWorker.cpp.obj	9ad0085804c13d29
+23196	28415	8121672883523480	CMakeFiles/InverTEM.dir/src/JacobianCache.cpp.obj	42a8f96bef2adb03
+29967	39484	8121672951227794	CMakeFiles/InverTEM.dir/src/MapTileLoader.cpp.obj	d943c9a6c6e324b8
+39485	41953	8121673046402750	CMakeFiles/InverTEM.dir/src/MatrixConvolution.cpp.obj	609b133d653d47a1
+9552	37145	8121691194294860	CMakeFiles/InverTEM.dir/src/MainWindow.cpp.obj	26b94ad15300a67b
+10866	19295	8121691207374537	CMakeFiles/InverTEM.dir/src/PlotWidget.cpp.obj	6090356262ba0213
+46385	60131	8121673115405947	CMakeFiles/InverTEM.dir/src/TemSolver.cpp.obj	7c20d3b1d94285a6
+18694	25104	8121691285663892	CMakeFiles/InverTEM.dir/src/UsfReader.cpp.obj	b9374bb59ed6f70f
+1577	53035	8121672667351271	CMakeFiles/invertem-native-tests.dir/src/CudaForward.cu.obj	cda75b9aa82d2cef
+19026	20562	8121691288964868	CMakeFiles/invertem-native-tests.dir/cmake_device_link.obj	3f62c0b45aafa036
+20570	21386	8121691304454011	invertem-native-tests.exe	b54430f5001fd83a
+28417	66985	8121672935724255	CMakeFiles/InverTEM.dir/src/CudaForward.cu.obj	5a924cf67678411c
+37146	29539431	8121691470181132	CMakeFiles/InverTEM.dir/cmake_device_link.obj	88c7b900bad0fffc
+29539573	29551042	8121986359140723	InverTEM.exe	16072fd6bb96320a
+209	955	8121691100805151	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/invertem-native-tests_autogen/timestamp	dc3d611c3a32e83d
+209	955	8121691100805151	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/invertem-native-tests_autogen/mocs_compilation.cpp	dc3d611c3a32e83d
+174	9465	8121691190669555	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/InverTEM_autogen/timestamp	d7545784609def45
+174	9465	8121691190669555	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/InverTEM_autogen/mocs_compilation.cpp	d7545784609def45
+11300	14397	8121672764556218	CMakeFiles/invertem-native-tests.dir/src/VectorKernel.cpp.obj	98d4f0ec97f552
+53075	57569	8121673182515677	CMakeFiles/InverTEM.dir/src/VectorKernel.cpp.obj	68ef7cdac755222f
+229	858	8122005212498512	invertem-native-tests_autogen/timestamp	dc3d611c3a32e83d
+229	858	8122005212498512	invertem-native-tests_autogen/mocs_compilation.cpp	dc3d611c3a32e83d
+229	858	8122005212498512	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/invertem-native-tests_autogen/timestamp	dc3d611c3a32e83d
+229	858	8122005212498512	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/invertem-native-tests_autogen/mocs_compilation.cpp	dc3d611c3a32e83d
+197	4790	8122005255288240	InverTEM_autogen/timestamp	d7545784609def45
+197	4790	8122005255288240	InverTEM_autogen/mocs_compilation.cpp	d7545784609def45
+197	4790	8122005255288240	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/InverTEM_autogen/timestamp	d7545784609def45
+197	4790	8122005255288240	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/InverTEM_autogen/mocs_compilation.cpp	d7545784609def45
+866	9080	8122005218900980	CMakeFiles/invertem-native-tests.dir/tests/native_tests.cpp.obj	f1665c0c81d06e6a
+4795	11996	8122005258168471	CMakeFiles/InverTEM.dir/InverTEM_autogen/mocs_compilation.cpp.obj	b2a0e8ef6bfafbdb
+907	12484	8122005219315620	CMakeFiles/invertem-native-tests.dir/src/TemSolver.cpp.obj	4f67bea2db453094
+9096	13893	8122005301284572	CMakeFiles/InverTEM.dir/src/main.cpp.obj	40cb5e1a6d24885c
+12485	15148	8122005335035351	CMakeFiles/InverTEM.dir/src/InversionWorker.cpp.obj	9ad0085804c13d29
+15149	18692	8122005361668376	CMakeFiles/InverTEM.dir/src/PlotWidget.cpp.obj	6090356262ba0213
+11996	26704	8122005330149658	CMakeFiles/InverTEM.dir/src/MainWindow.cpp.obj	26b94ad15300a67b
+18692	31438	8122005397116933	CMakeFiles/InverTEM.dir/src/TemSolver.cpp.obj	7c20d3b1d94285a6
+885	38234	8122005219089093	CMakeFiles/invertem-native-tests.dir/src/CudaForward.cu.obj	cda75b9aa82d2cef
+38235	39087	8122005592543682	CMakeFiles/invertem-native-tests.dir/cmake_device_link.obj	3f62c0b45aafa036
+39088	39476	8122005601073760	invertem-native-tests.exe	b54430f5001fd83a
+13893	45631	8122005349116451	CMakeFiles/InverTEM.dir/src/CudaForward.cu.obj	5a924cf67678411c
+45632	46748	8122005666513837	CMakeFiles/InverTEM.dir/cmake_device_link.obj	88c7b900bad0fffc
+46750	47672	8122005677692183	InverTEM.exe	16072fd6bb96320a

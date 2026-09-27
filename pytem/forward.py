@@ -35,7 +35,7 @@ from .transform_weights import MU0, HANKEL_FILTERS, FOURIER_FILTERS, EULER_PARAM
 from .backends import HAS_CUDA, GPU_HANKEL, GPU_FOURIER
 from .recursion import te_reflection_coeff
 from .kernels_numba import (
-    HAS_NUMBA,
+    HAS_NUMBA, KERNEL_MODES,
     _tem_circular_jit, _tem_square_jit,
     _tem_circular_euler_jit, _tem_square_euler_jit,
 )
@@ -441,7 +441,7 @@ def _run_circular(times, thicknesses, resistivities,
                   tx_radius, extra_weights,
                   h_base, h_j1, f_base, f_sin, f_cos, e_eta, e_A,
                   filter_weights, system_filter, signal, transform,
-                  use_numba, use_cuda, hankel_filter, fourier_filter):
+                  use_numba, use_cuda, hankel_filter, fourier_filter, mode=0):
     """
     Dispatch the circular-loop kernel to the best available backend.
 
@@ -475,11 +475,11 @@ def _run_circular(times, thicknesses, resistivities,
         if transform == 'euler':
             return _tem_circular_euler_jit(
                 times, thicknesses, resistivities,
-                a, extra_weights, MU0, h_base, h_j1, e_eta, e_A, fw)
+                a, extra_weights, MU0, h_base, h_j1, e_eta, e_A, fw, mode)
         else:
             return _tem_circular_jit(
                 times, thicknesses, resistivities,
-                a, extra_weights, MU0, h_base, h_j1, f_base, f_sin, fw)
+                a, extra_weights, MU0, h_base, h_j1, f_base, f_sin, fw, mode)
 
     # PATH 3: Pure Python (also handles impulse, signal=0)
     lam = h_base / a
@@ -500,7 +500,7 @@ def _run_square(times, thicknesses, resistivities,
                 h_base, h_j0, f_base, f_sin, f_cos, e_eta, e_A,
                 filter_weights, system_filter, signal, transform,
                 use_numba, use_cuda, hankel_filter, fourier_filter,
-                altitude=0.0):
+                altitude=0.0, mode=0):
     """
     Dispatch the square-loop (VMD area integral) kernel to the best backend.
 
@@ -534,12 +534,12 @@ def _run_square(times, thicknesses, resistivities,
             return _tem_square_euler_jit(
                 times, thicknesses, resistivities,
                 dist_q, area_w, MU0,
-                h_base, h_j0, e_eta, e_A, fw, altitude)
+                h_base, h_j0, e_eta, e_A, fw, altitude, mode)
         else:
             return _tem_square_jit(
                 times, thicknesses, resistivities,
                 dist_q, area_w, MU0,
-                h_base, h_j0, f_base, f_sin, fw, altitude)
+                h_base, h_j0, f_base, f_sin, fw, altitude, mode)
 
     # PATH 3: Pure Python (also handles impulse, signal=0)
     def _hz_sec(omega):
@@ -566,7 +566,7 @@ def fwd_circle_central(thicknesses, resistivities, tx_radius, times,
                        rx_area=1.0, rx_turns=1,
                        tx_height=0.0, rx_height=0.0,
                        hankel_filter='key_101', fourier_filter='key_81',
-                       transform='dlf', euler_order=11):
+                       transform='dlf', euler_order=11, kernel='exact'):
     """
     Central-loop TEM forward response for a 1-D layered earth.
 
@@ -598,6 +598,8 @@ def fwd_circle_central(thicknesses, resistivities, tx_radius, times,
     fourier_filter: str, default 'key_81'
     transform     : str, default 'dlf'        'dlf' or 'euler'
     euler_order   : int, default 11
+    kernel        : str, default 'exact'      Numba recursion: 'exact', 'fast_sqrt'
+                                              or 'vectorized' (see kernels_numba)
 
     Returns
     -------
@@ -620,7 +622,8 @@ def fwd_circle_central(thicknesses, resistivities, tx_radius, times,
                          tx_radius, extra_weights,
                          h_base, h_j1, f_base, f_sin, f_cos, e_eta, e_A,
                          filter_weights, system_filter, signal, transform,
-                         use_numba, use_cuda, hankel_filter, fourier_filter)
+                         use_numba, use_cuda, hankel_filter, fourier_filter,
+                         KERNEL_MODES[kernel])
     _apply_signal_scaling(dbdt, current, signal, transform)
     return dbdt * rx_fac
 
@@ -631,7 +634,7 @@ def fwd_circle_offset(thicknesses, resistivities, tx_radius, rx_offset,
                       rx_area=1.0, rx_turns=1,
                       tx_height=0.0, rx_height=0.0,
                       hankel_filter='key_101', fourier_filter='key_81',
-                      transform='dlf', euler_order=11):
+                      transform='dlf', euler_order=11, kernel='exact'):
     """
     Offset-loop TEM forward response for a 1-D layered earth.
 
@@ -649,7 +652,7 @@ def fwd_circle_offset(thicknesses, resistivities, tx_radius, rx_offset,
     rx_height     : float, default 0.0  Rx elevation above ground [m]
     current, signal, system_filter, use_numba, use_cuda,
     rx_area, rx_turns, hankel_filter, fourier_filter,
-    transform, euler_order : see fwd_circle_central
+    transform, euler_order, kernel : see fwd_circle_central
 
     Returns
     -------
@@ -674,7 +677,8 @@ def fwd_circle_offset(thicknesses, resistivities, tx_radius, rx_offset,
                          tx_radius, extra_weights,
                          h_base, h_j1, f_base, f_sin, f_cos, e_eta, e_A,
                          filter_weights, system_filter, signal, transform,
-                         use_numba, use_cuda, hankel_filter, fourier_filter)
+                         use_numba, use_cuda, hankel_filter, fourier_filter,
+                         KERNEL_MODES[kernel])
     _apply_signal_scaling(dbdt, current, signal, transform)
     return dbdt * rx_fac
 
@@ -686,7 +690,7 @@ def fwd_square_central(thicknesses, resistivities, tx_side, times,
                        rx_area=1.0, rx_turns=1,
                        tx_height=0.0, rx_height=0.0,
                        hankel_filter='key_101', fourier_filter='key_81',
-                       transform='dlf', euler_order=11):
+                       transform='dlf', euler_order=11, kernel='exact'):
     """
     Central square-loop TEM forward response for a 1-D layered earth.
 
@@ -697,7 +701,7 @@ def fwd_square_central(thicknesses, resistivities, tx_side, times,
     ----------
     thicknesses, resistivities, times, current, signal,
     system_filter, use_numba, use_cuda, rx_area, rx_turns,
-    hankel_filter, fourier_filter, transform, euler_order : see fwd_circle_central
+    hankel_filter, fourier_filter, transform, euler_order, kernel : see fwd_circle_central
     tx_side   : float  square Tx side length [m]
     n_quad        : int    GL quadrature points per axis (default 5)
     use_symmetry  : bool   exploit x<->y symmetry within quadrant (default True)
@@ -727,7 +731,7 @@ def fwd_square_central(thicknesses, resistivities, tx_side, times,
                        h_base, h_j0, f_base, f_sin, f_cos, e_eta, e_A,
                        filter_weights, system_filter, signal, transform,
                        use_numba, use_cuda, hankel_filter, fourier_filter,
-                       altitude=altitude)
+                       altitude=altitude, mode=KERNEL_MODES[kernel])
 
     # One-quadrant integration: multiply by 4 to recover the full loop response.
     dbdt *= 4.0
@@ -742,7 +746,7 @@ def fwd_square_offset(thicknesses, resistivities, tx_side,
                       use_cuda=True, rx_area=1.0, rx_turns=1,
                       tx_height=0.0, rx_height=0.0,
                       hankel_filter='key_101', fourier_filter='key_81',
-                      transform='dlf', euler_order=11):
+                      transform='dlf', euler_order=11, kernel='exact'):
     """
     Square-loop TEM response at an arbitrary receiver position (rx_x, rx_y).
 
@@ -752,7 +756,7 @@ def fwd_square_offset(thicknesses, resistivities, tx_side,
     ----------
     thicknesses, resistivities, times, current, signal,
     system_filter, use_numba, use_cuda, rx_area, rx_turns,
-    hankel_filter, fourier_filter, transform, euler_order : see fwd_circle_central
+    hankel_filter, fourier_filter, transform, euler_order, kernel : see fwd_circle_central
     tx_side : float  square Tx side length [m]
     rx_x        : float  Rx x-coordinate [m]
     rx_y        : float  Rx y-coordinate [m]
@@ -784,7 +788,7 @@ def fwd_square_offset(thicknesses, resistivities, tx_side,
                        h_base, h_j0, f_base, f_sin, f_cos, e_eta, e_A,
                        filter_weights, system_filter, signal, transform,
                        use_numba, use_cuda, hankel_filter, fourier_filter,
-                       altitude=altitude)
+                       altitude=altitude, mode=KERNEL_MODES[kernel])
     _apply_signal_scaling(dbdt, current, signal, transform)
     return dbdt * rx_fac
 

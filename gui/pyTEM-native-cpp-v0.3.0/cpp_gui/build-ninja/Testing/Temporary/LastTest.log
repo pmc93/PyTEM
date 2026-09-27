@@ -1,0 +1,19 @@
+Start testing: Sep 16 20:20 Romance Daylight Time
+----------------------------------------------------------
+1/1 Testing: pytem-native-tests
+1/1 Test: pytem-native-tests
+Command: "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/pyTEM-native-cpp-v0.3.0/cpp_gui/build-ninja/pytem-native-tests.exe" "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/pyTEM-native-cpp-v0.3.0/cpp_gui/tests/minimal.usf"
+Directory: C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/pyTEM-native-cpp-v0.3.0/cpp_gui/build-ninja
+"pytem-native-tests" start time: Sep 16 20:20 Romance Daylight Time
+Output:
+----------------------------------------------------------
+All native C++ tests passed
+<end of output>
+Test time =   1.51 sec
+----------------------------------------------------------
+Test Passed.
+"pytem-native-tests" end time: Sep 16 20:20 Romance Daylight Time
+"pytem-native-tests" time elapsed: 00:00:01
+----------------------------------------------------------
+
+End testing: Sep 16 20:20 Romance Daylight Time

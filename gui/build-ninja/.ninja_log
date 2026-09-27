@@ -1,0 +1,14 @@
+# ninja log v7
+25	12793	8112836557244477	pytem-inversion-gui_autogen/timestamp	d41cdc9895366cd5
+25	12793	8112836557244477	pytem-inversion-gui_autogen/mocs_compilation.cpp	d41cdc9895366cd5
+25	12793	8112836557244477	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/pytem-inversion-gui_autogen/timestamp	d41cdc9895366cd5
+25	12793	8112836557244477	C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/pytem-inversion-gui_autogen/mocs_compilation.cpp	d41cdc9895366cd5
+13241	21018	8112836566473540	CMakeFiles/pytem-inversion-gui.dir/InversionWorker.cpp.obj	bb2555612fa14cdf
+21020	23012	8112836644058382	CMakeFiles/pytem-inversion-gui.dir/MatrixConvolution.cpp.obj	ffd69dd64a41a8df
+13060	23462	8112836564604902	CMakeFiles/pytem-inversion-gui.dir/main.cpp.obj	1aee260dffa495f
+12966	24534	8112836563606958	CMakeFiles/pytem-inversion-gui.dir/pytem-inversion-gui_autogen/mocs_compilation.cpp.obj	6a429a1edcc7691c
+23014	29687	8112836663988469	CMakeFiles/pytem-inversion-gui.dir/PlotWidget.cpp.obj	d1b107b1b61f955b
+23466	29719	8112836668512051	CMakeFiles/pytem-inversion-gui.dir/TemSolver.cpp.obj	7778ec0891bd9cd1
+24539	31832	8112836679246237	CMakeFiles/pytem-inversion-gui.dir/UsfReader.cpp.obj	1eb35ff3f3f66544
+13135	40739	8112836565373461	CMakeFiles/pytem-inversion-gui.dir/MainWindow.cpp.obj	645f9d43470b97b6
+40746	42982	8112836841287445	pytem-inversion-gui.exe	9693a17fc1ea35dc

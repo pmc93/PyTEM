@@ -837,7 +837,7 @@ def _read_usf_notes(folder) -> dict:
     return notes
 
 
-def read_usf(folder: str) -> TunoeTEMData:
+def read_usf(folder: str, max_soundings: int | None = None) -> TunoeTEMData:
     """
     Read every TEMcompany `.usf` sounding file in `folder` into one dataset.
 
@@ -858,12 +858,17 @@ def read_usf(folder: str) -> TunoeTEMData:
         Directory containing the `.usf` files (one per station). A sibling
     ``Notes_*.txt`` field-log, if present, is parsed too and its
     ``UserNote`` per station attached as the ``UserNote`` column.
+    max_soundings : int or None, default None
+        Maximum number of sorted sounding files to read. ``None`` reads the
+        full folder.
 
     Returns
     -------
     TunoeTEMData
     """
     paths = sorted(Path(folder).glob("*.usf"))
+    if max_soundings is not None:
+        paths = paths[:max_soundings]
     if not paths:
         raise ValueError(f"No .usf files found in {folder!r}")
 

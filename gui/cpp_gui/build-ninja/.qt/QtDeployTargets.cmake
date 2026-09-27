@@ -1,0 +1,6 @@
+set(__QT_DEPLOY_TARGET_pytem-inversion-gui_FILE C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/cpp_gui/build-ninja/pytem-inversion-gui.exe)
+set(__QT_DEPLOY_TARGET_pytem-inversion-gui_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_pytem-inversion-gui_RUNTIME_DLLS C:/Qt/6.11.2/msvc2022_64/bin/Qt6Widgets.dll;C:/Qt/6.11.2/msvc2022_64/bin/Qt6Network.dll;C:/Qt/6.11.2/msvc2022_64/bin/Qt6Gui.dll;C:/Qt/6.11.2/msvc2022_64/bin/Qt6Core.dll)
+set(__QT_DEPLOY_TARGET_pytem-native-tests_FILE C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/cpp_gui/build-ninja/pytem-native-tests.exe)
+set(__QT_DEPLOY_TARGET_pytem-native-tests_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_pytem-native-tests_RUNTIME_DLLS )

@@ -1,0 +1,124 @@
+InverTEM 1.0.0
+
+This source package includes:
+- DLF and Euler-11 forward transforms
+- pyTEM joint inversion method (default): port of pytem.invert_joint with one shared 75-point step grid for LM+HM, 5-trial alpha ladder with RMS backtracking, and cumulative-sensitivity DOI (thresholds 1.2/5.0, 10x refinement)
+- fused step-response/adjoint-Jacobian kernel with precomputed Hankel, filter and transform terms and an e^-50 attenuation cutoff
+- step times outside every gate skipped, and repeated layers (refined DOI model) reuse their propagation terms
+- AVX2 wavenumber-vectorised kernel with explicit intrinsics and its own vectorised exp/sin/cos (compiler-independent, runtime CPU check), plus optional fast square root, selectable in the Solver panel
+- Tx/Rx heights above ground (USF /TX_HEIGHT, /RX_HEIGHT) in every forward path, for airborne data such as GERDA SkyTEM exports
+- single-sweep USF moments use ERROR_BAR (relative error, %) for their standard errors
+- optional native NVIDIA CUDA acceleration for circular DLF forward trials
+- optimized CUDA recursion with precomputed conductivity and receiver geometry and no per-thread 128-layer array
+- CUDA 13.x/MSVC builds enable the standard-conforming host preprocessor and C++ language-version macro
+- optimized CPU forward recursion with invariant conductivity, filter, and Hankel geometry terms hoisted out of the inner loop
+- analytical adjoint and finite-difference Jacobians
+- optional guarded Broyden rank-one Jacobian updates with periodic full refresh
+- transform (Euler default), Jacobian (analytical default) and Jacobian update read from invertem_solver.txt beside the executable instead of GUI controls
+- resistivity-axis plot limits in the Batch and output column
+- pyTEM joint: L1 blocky model norm (IRLS roughness re-weighted each iteration) and optional adaptive alpha search (one extra trial at the alpha interpolated to RMS 1; off by default, as in the notebook); GPU and Jacobian-cache options hidden for the joint method
+- pyTEM joint stops a sounding ("stagnated") when RMS improves by less than 1% over 5 iterations
+- batch preparation reuses the shared-grid gate matrices across soundings with identical gates and waveform (about 50 ms per sounding saved)
+- "Move kept USF files..." moves the USF files of soundings included in the batch to a chosen folder and updates the project paths
+- pyTEM joint: the starting-model step response and Jacobian are computed once per system and shared by all soundings and workers
+- Fast SCI model norm (after Lupus/TEMcompany): all included soundings inverted together in linear data space with vertical and Delaunay spatial constraints (distance-scaled), Marquardt damping chosen by a growing/shrinking step-length limit, block-Jacobi preconditioned conjugate-gradient solve; strengths set in invertem_solver.txt
+- Fast SCI in log or linear data space ("Fast SCI (log)" / "Fast SCI (lin)"), with per-sounding step back-off and continued damping after a worse step at the minimum step length
+- Fast SCI accepts steps on the median log-space RMS of the active soundings and abandons (freezes) soundings above RMS 1 that improve < 1% over 3 iterations
+- layered-earth model legend shows each model's norm and final RMS (SCI models in green)
+- Fast SCI also stops when the median log-space RMS of the non-abandoned soundings reaches 1; progress lines report total and median RMS
+- L1 blocky is the first and default model norm
+- invertem_solver.txt re-read before every batch; missing settings (incl. sci_* and sci_max_iterations) appended automatically; looser Fast SCI defaults (vertical 3.0, lateral 1.5)
+- Build_InverTEM.bat packs a portable single-file InverTEM_portable.exe with Enigma Virtual Box (Package_InverTEM.ps1), including the MSVC/OpenMP runtime
+- automatic gate selection on import (UsfReader::autoSelectGates): quality, SNR >= 3, nothing after a sign change, smooth-decay culling in log-log with late-time cut and dropping of mostly non-smooth moments; "Auto-filter gates" button re-applies it; moments emptied by the filter are left out instead of skipping the sounding
+- short model legend labels ("L1 (40 layers) RMS 0.98") with one colour per shown model; plot title "Model, RMS x"
+- Build_InverTEM.bat stops on negative exit codes from a failed link (e.g. InverTEM.exe still open) and no longer mistakes an MSVC cache for MinGW
+- new and loaded projects start with default inversion settings (layer model, error floor, L1, kernel options); display settings still come from the project
+- gate editing (data and transect plots): right-click toggles one gate, right-drag removes the gates in the box, Shift+right-drag restores them, Ctrl+Z undoes gate, auto-filter and inclusion edits (100 steps)
+- editing gates keeps the model on screen, marked "(gates changed)" with a dashed predicted response, instead of deleting it; the data plot always shows the current gate selection
+- excluding a sounding on the map no longer blanks its gates; its gates show greyed and return unchanged on re-inclusion (older projects are converted on load)
+- vectorised AVX2 kernel always used when available (no checkbox); fast-square-root option removed from GUI and solver
+- "Model norm" renamed "Regularisation"; Fast SCI (log) shown as "SCI"; the linear-data-space SCI is hidden
+- upper (LM) transect plot has no distance-axis label
+- SCI lateral constraints compare neighbours at the same elevation by default (sci_constraints = elevation | depth), interpolating the neighbour's model between layer mid-depths; general sparse constraint rows and per-sounding constraint blocks in the preconditioner
+- transect plots show four y-axis labels
+- SCI starts each sounding from its best homogeneous half-space (33 shared half-space responses, 1 Ohm m - 10 kOhm m) and computes the DOI with 3x layer refinement: about half the time and fewer iterations
+- inversion method read from invertem_solver.txt (pyTEM joint default; no GUI selector); NVIDIA GPU option in the Solver column; Layer model group replaces the Forward response column
+- waveform/gate matrix convolution and band-pass filters
+- individual LM or HM inversion
+- joint LM+HM inversion against one shared layered-earth model
+- multiple-USF import and bounded parallel sounding inversion
+- synchronized independent-inversion batch scheduler with no lateral coupling
+- exact reuse of compatible starting-model forwards and first Jacobians
+- batched alpha-trial forwards with independently advancing/converging soundings
+- optional OpenMP worker loops with standard C++ thread fallback
+- partial-pivot LU/back-substitution replacing prototype Gauss-Jordan solves
+- completed models emitted immediately and retained when a batch is killed
+- New/Load/Save project manager using versioned .ivtp project files
+- projects embed the parsed USF sounding data, so they reopen without the USF files (older projects fall back to the files)
+- project persistence for USF references, gate and sounding selections, solver/map settings, and saved inversion models
+- first-import project geometry lock; later USFs with different loop or receiver geometry are rejected without replacing existing data
+- additive USF imports within a project, with duplicate-file detection
+- WalkTEM Importer USF support, including three-column TIME/VOLTAGE/QUALITY tables
+- automatic gate-width derivation and ideal turn-off waveform fallback when arrays are absent
+- WGS84 UTM EPSG:326xx/327xx conversion for background-map placement
+- shared in-memory and persistent first-iteration Jacobian cache
+- L1 blocky or L2 smooth regularization
+- retained L1/L2 and alternate-layer-count results with overlaid model curves
+- noise-weighted cumulative-sensitivity DOI estimate with the model dashed below DOI
+- clear-saved-results control for releasing retained inversion models
+- Aarhus Workbench-compatible XYZ batch export with resistivity, layer depths, DOI, and RMS
+- RMS-increase alpha stopping and a single-evaluation local RMS=1 target fit
+- optional per-sounding adaptive alpha search with finite-trial guards, best-model retention, and automatic fixed-sweep fallback
+- equal-width data/model plots with a wider, resizable, full-height map column
+- sounding navigation and file import moved into the left information sidebar
+- layer-count and maximum-depth editor moved into the information sidebar
+- geometry and system summaries retained below the sidebar navigator
+- streamlined top panel without a redundant import-tab label
+- right-clickable data gates, with LM blue and HM red
+- right-button drag selection for disabling or restoring multiple gates at once
+- switchable LM/HM distance-transect view with a user-set number of soundings per page (default 30, saved in the project)
+- transect-page soundings highlighted simultaneously on the map
+- marker-only input data and fitted-response lines shown only after inversion
+- compact data legend containing LM/HM data only, without disabled-point entries
+- USF standard-error bars on observed data gates
+- scientific-notation time ticks on the TEM data plot
+- live selected-gate count after plot edits
+- clickable map soundings that can be included in or excluded from a batch
+- left-click map navigation and right-click batch inclusion/exclusion
+- stable splitter geometry when loading maps or right-clicking soundings, while retaining normal window resizing
+- map exclusion selects the sounding, greys every gate, and restores the prior selection on re-inclusion
+- warning and automatic skip for soundings with fewer than three enabled gates (more than ten are summarised as a count; the full list goes to the run log)
+- modal progress dialog while a batch inversion is being prepared
+- sounding selector and previous/next arrows stay active while a batch runs (gate edits stay locked)
+- equal-scale map with an automatic distance scale bar and optional OpenStreetMap or satellite 7 x 7 tile layers
+- map background radio buttons and tile progress at the bottom of the map column
+- background maps fill the complete data-driven map extent without white bands
+- compact map extent and working tile background for a single loaded sounding
+- cached map downloads with a dedicated tile progress bar
+- map legend on an opaque white backing, with uncluttered Easting/Northing axes
+- marker-only disabled gates and sounding map, with no connecting lines
+- modal progress bar while importing multiple USF files
+- column-oriented inversion settings with no starting-resistivity label
+- resistivity model plot without a redundant single-curve legend
+- recovered-model depth axis pinned to 0 m at the surface
+- 15-layer default with layer bases log-spaced from the thickness of layer 1 (2 m) to the depth to the top of layer N (120 m), as in the pyTEM notebook
+- transmitter waveform and receiver bandpass filters always modelled; per-sounding "Export results" removed (use the XYZ export)
+- fixed 100 Ohm m starting model with no GUI min/max resistivity controls
+- previous/next navigation through soundings and recovered models
+- batch percentage and elapsed time, with ETA updates throttled to ten seconds
+- elapsed time refreshed every second independently of the throttled ETA
+- completed sounding markers filled and coloured by final RMS from 0.00 to 5.00
+- live RMS on the map: soundings still inverting show a ring coloured by the RMS after their latest iteration
+- automatic or user-defined resistivity plot limits with sensible logarithmic ticks
+- black plot-axis labels and two-decimal status reporting
+- RMS values through 1.004 accepted as displayed convergence at 1.00
+- Kill inversion control that retains every completed model
+- automatic per-stage inversion timing report beside the input USF files
+- desktop-aware initial window sizing and centering
+- optional g4.png application icon copied beside the executable at build time
+- fixed internal iteration and alpha-trial counts with no menu controls
+- streamlined panels without Data, Geometry, System, Navigation, or Settings captions
+- one-click Windows configure-and-compile batch file that locates nvcc, initializes the MSVC x64 host compiler, auto-detects Qt's MSVC 2022 kit, refreshes stale CUDA or MinGW-Qt detection, and deploys the matching Qt runtime beside the executable (does not launch the GUI)
+
+The running application title is:
+InverTEM 1.0.0

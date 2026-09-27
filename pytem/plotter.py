@@ -72,11 +72,129 @@ def plot_model(thicknesses, resistivities, ax=None, figsize=(4, 4),
     return ax
 
 
+def plot_survey_models(thicknesses, resistivity_models, rms=None, doi=None,
+                       station_names=None, line_indices=None, station_ids=None,
+                       n_cols=5,
+                       xlim=(1, 5e2), figsize_per_panel=(3, 3),
+                       model_linestyle='--'):
+    """Plot 1D resistivity models with RMS and optional DOI lines."""
+    thicknesses = np.asarray(thicknesses, dtype=float)
+    models = np.asarray(resistivity_models, dtype=float)
+    if models.ndim != 2 or models.shape[1] != thicknesses.size + 1:
+        raise ValueError('resistivity_models must have shape (n_stations, n_layers).')
+    if n_cols < 1:
+        raise ValueError('n_cols must be positive.')
+
+    n_stations = models.shape[0]
+    rms_values = None if rms is None else np.asarray(rms, dtype=float)
+    if rms_values is not None and rms_values.shape != (n_stations,):
+        raise ValueError('rms must have one value per station.')
+    if station_names is None:
+        station_names = [str(i) for i in range(n_stations)]
+    if len(station_names) != n_stations:
+        raise ValueError('station_names must have one name per station.')
+    if station_ids is None:
+        station_ids = np.arange(n_stations)
+    if len(station_ids) != n_stations:
+        raise ValueError('station_ids must have one value per station.')
+    if line_indices is not None and len(line_indices) != n_stations:
+        raise ValueError('line_indices must have one value per station.')
+
+    doi_values = doi_capped = None
+    if doi is not None:
+        if isinstance(doi, dict):
+            doi_values = np.asarray(doi.get('standard'), dtype=float)
+            doi_capped = np.asarray(doi.get('standard_capped',
+                                             np.zeros(n_stations, dtype=bool)), dtype=bool)
+        else:
+            doi_values = np.asarray(doi, dtype=float)
+        if doi_values.shape != (n_stations,):
+            raise ValueError('doi must have one value per station.')
+
+    n_rows = max(1, int(np.ceil(n_stations / n_cols)))
+    fig = plt.figure(figsize=(figsize_per_panel[0] * n_cols,
+                              figsize_per_panel[1] * n_rows))
+    grid = fig.add_gridspec(
+        n_rows, n_cols,
+    )
+    axes = np.array([
+        fig.add_subplot(grid[row, col])
+        for row in range(n_rows) for col in range(n_cols)
+    ])
+
+    for ax, station in zip(axes, range(n_stations)):
+        title = str(station_names[station])
+        if line_indices is not None:
+            title = f'Line {line_indices[station]} | {title}'
+        if rms_values is not None:
+            title += f'  RMS={rms_values[station]:.3f}'
+        if doi_values is not None and np.isfinite(doi_values[station]):
+            plot_model(thicknesses, models[station], ax=ax, color='grey',
+                       label=None, title=title, xlim=xlim,
+                       linestyle='--')
+            depths = np.concatenate(([0.0], np.cumsum(thicknesses)))
+            doi_depth = doi_values[station]
+            layer = np.searchsorted(depths, doi_depth, side='right') - 1
+            layer = min(max(layer, 0), models.shape[1] - 1)
+            upper_x = np.r_[models[station, :layer + 1], models[station, layer]]
+            upper_y = np.r_[depths[:layer + 1], doi_depth]
+            ax.step(upper_x, upper_y, where='pre', color='black',
+                    linestyle='-', label=None)
+        else:
+            plot_model(thicknesses, models[station], ax=ax, color='black',
+                       label=None, title=title, xlim=xlim,
+                       linestyle=model_linestyle)
+
+    for ax in axes[n_stations:]:
+        ax.axis('off')
+
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_survey_responses(station_results, station_ids=None, n_cols=5,
+                          figsize_per_panel=(3.2, 3), moment_colors=None):
+    """Plot observed and modelled LM/HM responses for survey stations."""
+    if not station_results:
+        raise ValueError('station_results must not be empty.')
+    if station_ids is None:
+        station_ids = list(station_results)
+    station_ids = list(station_ids)
+    n_stations = len(station_ids)
+    moment_colors = moment_colors or {'LM': 'tab:blue', 'HM': 'tab:red'}
+    n_rows = max(1, int(np.ceil(n_stations / n_cols)))
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(figsize_per_panel[0] * n_cols,
+                 figsize_per_panel[1] * n_rows),
+        sharex=True, squeeze=False)
+    axes = axes.ravel()
+
+    for ax, station in zip(axes, station_ids):
+        result = station_results[station]
+        for moment, color in moment_colors.items():
+            if moment not in result['times']:
+                continue
+            ax.loglog(result['times'][moment], np.abs(result['obs'][moment]),
+                      'o', ms=4, color=color, label=f'{moment} obs')
+            ax.loglog(result['times'][moment], np.abs(result['pred'][moment]),
+                      '-', lw=1.5, color=color, label=f'{moment} model')
+        ax.grid(True, which='both', ls=':', alpha=0.4)
+
+    for ax in axes[n_stations:]:
+        ax.axis('off')
+    axes[0].set_ylabel('|dB/dt| [V/m$^2$]')
+    axes[0].legend(fontsize=6)
+    fig.supxlabel('Time [s]')
+    fig.tight_layout()
+    return fig, axes
+
+
 def plot_inversion(times, obs_data, mod_data, thicknesses,
                   best_rho, iter_rms_list, true_rho=None,
                   true_thicknesses=None, rho_hist=None,
                   xlim_rho=None, depth_pad=10, noise=None,
-                  figsize=(12, 4)):
+                  figsize=(12, 4), model_label='Inverted', true_label='True'):
     """Three-panel summary: sounding, RMS convergence, model.
 
     Parameters
@@ -94,6 +212,8 @@ def plot_inversion(times, obs_data, mod_data, thicknesses,
     depth_pad        : extra depth below deepest interface.
     noise            : relative noise level (float) or absolute noise array.
     figsize          : overall figure size.
+    model_label      : legend label for the inverted model (default 'Inverted').
+    true_label       : legend label for the true_rho overlay (default 'True').
     """
     fig, axs = plt.subplots(1, 3, figsize=figsize)
 
@@ -136,7 +256,7 @@ def plot_inversion(times, obs_data, mod_data, thicknesses,
                     where='pre', color='C0', alpha=0.15, lw=0.8)
 
     ax.step(np.r_[best_rho, best_rho[-1]], np.r_[depths, y_end],
-            where='pre', label='Inverted', color='C0', lw=2)
+            where='pre', label=model_label, color='C0', lw=2)
 
     if true_rho is not None:
         t_thick = np.asarray(true_thicknesses if true_thicknesses is not None
@@ -144,7 +264,7 @@ def plot_inversion(times, obs_data, mod_data, thicknesses,
         t_depths = np.concatenate(([0], np.cumsum(t_thick[:-1])))
         ax.step(np.r_[true_rho, true_rho[-1]],
                 np.r_[t_depths, y_end],
-                where='pre', label='True', color='C3', lw=1.5, ls='--')
+                where='pre', label=true_label, color='C3', lw=1.5, ls='--')
 
     ax.invert_yaxis()
     ax.set_xscale('log')

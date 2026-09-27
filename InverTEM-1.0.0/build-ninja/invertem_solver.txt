@@ -1,0 +1,12 @@
+# InverTEM solver settings, read at start-up
+transform = euler          # euler | dlf (DLF enables the CUDA option)
+jacobian = analytical      # analytical | finite_difference (not used by pyTEM joint)
+jacobian_update = full     # full | broyden (not used by pyTEM joint)
+broyden_refresh = 3        # iterations between full Jacobians with broyden (2-10)
+method = pytem_joint       # pytem_joint | adaptive (InverTEM adaptive Gauss-Newton)
+sci_vertical_factor = 3  # Fast SCI: resistivity factor allowed between adjacent layers (larger = looser)
+sci_lateral_factor = 1.5   # Fast SCI: factor allowed between neighbours at the reference distance (larger = looser)
+sci_reference_distance = 100  # Fast SCI: distance [m] at which sci_lateral_factor applies
+sci_distance_power = 0.5   # Fast SCI: lateral constraint loosens as (distance / reference)^power
+sci_max_iterations = 30   # Fast SCI: iteration limit
+sci_constraints = elevation   # SCI: compare neighbours at the same elevation | depth below the surface

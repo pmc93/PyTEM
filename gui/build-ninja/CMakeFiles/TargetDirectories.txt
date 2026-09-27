@@ -1,0 +1,9 @@
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/pytem-inversion-gui.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/edit_cache.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/rebuild_cache.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/list_install_components.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/install.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/install/local.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/install/strip.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/pytem-inversion-gui_autogen_timestamp_deps.dir
+C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/gui/build-ninja/CMakeFiles/pytem-inversion-gui_autogen.dir

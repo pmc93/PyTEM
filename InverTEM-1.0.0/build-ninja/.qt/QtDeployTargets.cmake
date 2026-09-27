@@ -1,0 +1,6 @@
+set(__QT_DEPLOY_TARGET_InverTEM_FILE C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/InverTEM.exe)
+set(__QT_DEPLOY_TARGET_InverTEM_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_InverTEM_RUNTIME_DLLS C:/Qt/6.11.2/msvc2022_64/bin/Qt6Widgets.dll;C:/Qt/6.11.2/msvc2022_64/bin/Qt6Network.dll;C:/Qt/6.11.2/msvc2022_64/bin/Qt6Gui.dll;C:/Qt/6.11.2/msvc2022_64/bin/Qt6Core.dll)
+set(__QT_DEPLOY_TARGET_invertem-native-tests_FILE C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/invertem-native-tests.exe)
+set(__QT_DEPLOY_TARGET_invertem-native-tests_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_invertem-native-tests_RUNTIME_DLLS )

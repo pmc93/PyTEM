@@ -1,0 +1,57 @@
+pyTEM Native C++ Inversion GUI 0.4.0
+
+This source package includes:
+- DLF and Euler-11 forward transforms
+- optional native NVIDIA CUDA acceleration for circular DLF forward trials
+- optimized CUDA recursion with precomputed conductivity and receiver geometry and no per-thread 128-layer array
+- CUDA 13.x/MSVC builds enable the standard-conforming host preprocessor and C++ language-version macro
+- optimized CPU forward recursion with invariant conductivity, filter, and Hankel geometry terms hoisted out of the inner loop
+- analytical adjoint and finite-difference Jacobians
+- waveform/gate matrix convolution and band-pass filters
+- individual LM or HM inversion
+- joint LM+HM inversion against one shared layered-earth model
+- multiple-USF import and bounded parallel sounding inversion
+- WalkTEM Importer USF support, including three-column TIME/VOLTAGE/QUALITY tables
+- automatic gate-width derivation and ideal turn-off waveform fallback when arrays are absent
+- WGS84 UTM EPSG:326xx/327xx conversion for background-map placement
+- shared in-memory and persistent first-iteration Jacobian cache
+- L1 blocky or L2 smooth regularization
+- Python-matched RMS-increase alpha stopping and parabolic RMS=1 target fit
+- equal-width data/model plots with a wider, resizable, full-height map column
+- sounding navigation and file import moved into the left information sidebar
+- geometry and system summaries retained below the sidebar navigator
+- streamlined top panel without a redundant import-tab label
+- right-clickable data gates, with LM blue and HM red
+- marker-only input data and fitted-response lines shown only after inversion
+- compact data legend containing LM/HM data only, without disabled-point entries
+- USF standard-error bars on observed data gates
+- scientific-notation time ticks on the TEM data plot
+- live selected-gate count after plot edits
+- clickable map soundings that can be included in or excluded from a batch
+- left-click map navigation and right-click batch inclusion/exclusion
+- stable splitter/window geometry when loading maps or right-clicking soundings
+- map exclusion selects the sounding, greys every gate, and restores the prior selection on re-inclusion
+- warning and automatic skip for soundings with fewer than three enabled gates
+- equal-scale map with an automatic distance scale bar and optional OpenStreetMap or satellite 5 x 5 tile layers
+- map background radio buttons and tile progress at the bottom of the map column
+- background maps fill the complete data-driven map extent without white bands
+- cached map downloads with a dedicated tile progress bar
+- map legend on an opaque white backing, with uncluttered Easting/Northing axes
+- marker-only disabled gates and sounding map, with no connecting lines
+- modal progress bar while importing multiple USF files
+- column-oriented inversion settings with no starting-resistivity label
+- resistivity model plot without a redundant single-curve legend
+- recovered-model depth axis pinned to 0 m at the surface
+- 15-layer default, 1 m first layer, and geometric thicknesses to a chosen depth
+- fixed 100 Ohm m starting model with no GUI min/max resistivity controls
+- previous/next navigation through soundings and recovered models
+- batch percentage and elapsed time, with ETA updates throttled to ten seconds
+- Kill inversion control that retains every completed model
+- automatic per-stage inversion timing report beside the input USF files
+- desktop-aware initial window sizing and centering
+- fixed internal iteration and alpha-trial counts with no menu controls
+- streamlined panels without Data, Geometry, System, Navigation, or Settings captions
+- one-click Windows configure-and-compile batch file that locates nvcc, initializes the MSVC x64 host compiler, auto-detects Qt's MSVC 2022 kit, refreshes stale CUDA or MinGW-Qt detection, and deploys the matching Qt runtime beside the executable (does not launch the GUI)
+
+The running application title must begin with:
+pyTEM Native C++ Inversion v0.4.0

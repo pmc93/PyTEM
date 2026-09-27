@@ -103,8 +103,7 @@ class Survey:
                 ax.loglog(t, mean, color=color, lw=2.2, marker='o', ms=4,
                          label=f'{m} mean ({dbdt.shape[0]} soundings)')
         ax.set_xlabel('Time [s]')
-        ax.set_ylabel(r'|dB/dt|')
-        ax.set_title('Soundings')
+        ax.set_ylabel(r'$|dB/dt|$ [V/m$^2$]')
         ax.grid(True, which='both', ls=':', alpha=0.5)
         if show_mean:
             ax.legend(fontsize=8)
@@ -113,58 +112,132 @@ class Survey:
     # ------------------------------------------------------------------
     # Transects
     # ------------------------------------------------------------------
-    def plot_transects(self, moment, gates=None, n_gates=3, axes=None, figsize=(7, 7),
-                       x_axis='distance', bad_mask=None, legend=True):
+    def plot_transect(self, moment, gates=None, n_gates=3, axes=None, ax=None,
+                      figsize=(7, 7),
+                       x_axis='distance', bad_mask=None, legend=True,
+                       line_numbers=None, title=None, line=None):
         """Signal vs. distance-along-line (or station index), one subplot per line.
 
         Parameters
         ----------
         moment  : 'LM' or 'HM' -- exactly one moment (see module docstring).
-        gates   : list of int gate indices (0-based), or None to auto-pick
+       gates   : list of int gate indices (0-based), or None to auto-pick
                  ``n_gates`` evenly-spaced gates.
-        n_gates : number of auto-picked gates when ``gates`` is None.
+       n_gates : number of auto-picked gates when ``gates`` is None.
         axes    : existing array of Axes (one per line), or None to create them.
+        ax      : existing single Axes, useful when plotting one line.
         x_axis  : 'distance' (default, cumulative distance along the line
                  [m]) or 'index' (station order within the line, 0-based).
         bad_mask : (n_stations, n_gates) boolean array (True = bad/excluded
                  data), or None. Bad points are circled in black.
         legend  : whether to draw the per-gate-time legend on each subplot.
+        line_numbers : sequence, optional
+            Display labels for the lines. Defaults to the line identifiers
+            detected from the survey data.
+        title : str, optional
+            Figure-level title placed above the transect subplots.
+        line : optional
+            Plot only this line identifier. Defaults to all lines.
         """
         m = moment.upper()
         lines = self.tem.lines()
+        if line is not None:
+            if str(line) not in lines:
+                raise ValueError(f'Unknown line {line!r}; available lines: {lines}')
+            lines = [str(line)]
+        if line_numbers is None:
+            line_numbers = lines
+        elif len(line_numbers) != len(lines):
+            raise ValueError('line_numbers must contain one label per line.')
         t = self.tem.gate_times[m]["center"]
         if gates is None:
-            gates = np.linspace(0, len(t) - 1, n_gates).round().astype(int)
+            gates = np.arange(len(t)) if n_gates is None else np.linspace(
+                0, len(t) - 1, n_gates).round().astype(int)
         dbdt = self.tem.dbdt(m)
 
-        if axes is None:
+        if ax is not None:
+            if axes is not None:
+                raise ValueError('Pass either ax or axes, not both.')
+            if len(lines) != 1:
+                raise ValueError('ax can only be used when plotting one line.')
+            axes = [ax]
+        elif axes is None:
             _, axes = plt.subplots(len(lines), 1, figsize=figsize, sharey=True)
         axes = np.atleast_1d(axes)
 
-        for ax, line, color in zip(axes, lines, LINE_COLORS):
+        for ax, line, line_number, color in zip(axes, lines, line_numbers, LINE_COLORS):
             mask = self.tem.line_mask(line)
             x = np.arange(mask.sum()) if x_axis == 'index' else self.tem.distance_along_line(line)
             for g in gates:
                 vals = np.abs(dbdt[mask, g])
-                ax.semilogy(x, vals, 'o-', ms=4, lw=1.4, alpha=0.85,
-                           label=f't = {t[g] * 1e6:.0f} \u00b5s')
+                bad = np.zeros_like(vals, dtype=bool)
                 if bad_mask is not None:
                     bad = bad_mask[mask, g]
-                    if np.any(bad):
-                        ax.scatter(x[bad], vals[bad], s=110, facecolors='none',
-                                  edgecolors='k', linewidths=1.3, zorder=5)
+                valid_line, = ax.semilogy(
+                    x[~bad], vals[~bad], 'o-', ms=4, lw=1.4, alpha=0.65,
+                    label=f't = {t[g] * 1e6:.0f} \u00b5s')
+                if np.any(bad):
+                    ax.semilogy(x[bad], vals[bad], 'o', ms=4, alpha=0.65,
+                                color=valid_line.get_color(), zorder=4)
             ax.set_xlabel('Station index' if x_axis == 'index' else 'Distance along line [m]')
-            ax.set_title(f'Line {line}')
+            ax.set_ylabel(f'{m} dB/dt [V/m$^2$]')
             ax.grid(True, which='both', ls=':', alpha=0.5)
             if legend:
                 ax.legend(fontsize=8)
-        axes[0].set_ylabel(f'|dB/dt| ({m})')
+        if title is not None:
+            axes[0].get_figure().suptitle(title)
         return axes
 
     # ------------------------------------------------------------------
     # Map
     # ------------------------------------------------------------------
-    def plot_map(self, ax=None, figsize=(7, 7), basemap=True, provider=None):
+    def export_xyz(self, path, resistivities, depths, doi_conservative,
+                   doi_standard, residual, station_ids=None, line_num=None,
+                   instrument='tTEM', epsg='epsg:25832', max_rms=None):
+        """Export inversion models and survey metadata to Workbench XYZ."""
+        data = self.tem.data if station_ids is None else self.tem.data.iloc[station_ids]
+        x = np.asarray(data['E'], dtype=float)
+        y = np.asarray(data['N'], dtype=float)
+        elev = np.asarray(data['Elevation'], dtype=float)
+        rhos = np.asarray(resistivities, dtype=float)
+        depths = np.asarray(depths, dtype=float)
+        n_soundings, n_layers = rhos.shape
+        if depths.shape != rhos.shape:
+            raise ValueError('depths must have the same shape as resistivities.')
+
+        if line_num is None:
+            line_num = np.asarray(data['Line'], dtype=int)
+        else:
+            line_num = np.asarray(line_num, dtype=int)
+        columns = (['LINE_NO', 'UTMX', 'UTMY', 'ELEVATION']
+                   + [f'RHO{i + 1}' for i in range(n_layers)]
+                   + [f'RHO{i + 1}_STD' for i in range(n_layers)]
+                   + [f'DEP_BOT{i + 1}' for i in range(n_layers)]
+                   + [f'DEP_BOT{i + 1}_STD' for i in range(n_layers)]
+                   + ['DOI_CONSERVATIVE', 'DOI_STANDARD', 'RESDATA'])
+        output = np.full((n_soundings, len(columns)), np.nan)
+        output[:, 0:4] = np.column_stack((line_num, x, y, elev))
+        rho_start = 4
+        depth_start = 4 + 2 * n_layers
+        output[:, rho_start:rho_start + n_layers] = rhos
+        output[:, depth_start:depth_start + n_layers] = depths
+        output[:, -3] = doi_conservative
+        output[:, -2] = doi_standard
+        output[:, -1] = residual
+        if max_rms is not None:
+            output = output[residual <= max_rms, :]
+
+        epsg_code = str(epsg).split(':')[-1]
+        with open(path, 'w', encoding='utf-8') as stream:
+            stream.write('Aarhus Workbench XYZ export\nDATA TYPE\n')
+            stream.write(f'{instrument}/DT\nCOORDINATE SYSTEM\n')
+            stream.write(f'epsg:{epsg_code}\n/ ' + ' '.join(columns) + '\n')
+            for row in output:
+                stream.write(' '.join(f'{value:.6g}' for value in row) + '\n')
+        return path
+
+    def plot_map(self, ax=None, figsize=(7, 7), basemap=True, provider=None,
+                 attribution=False):
         """Station map coloured by line, with an optional basemap.
 
         Falls back to a plain scatter plot (no basemap) if ``contextily``
@@ -194,7 +267,8 @@ class Survey:
             try:
                 import contextily as ctx
                 source = provider if provider is not None else ctx.providers.OpenTopoMap
-                ctx.add_basemap(ax, crs=f'EPSG:{epsg}', source=source, zoom='auto')
+                ctx.add_basemap(ax, crs=f'EPSG:{epsg}', source=source, zoom='auto',
+                                attribution=attribution)
             except Exception as exc:
                 ax.set_facecolor('#e8e8e8')
                 ax.grid(True, ls=':', alpha=0.5)

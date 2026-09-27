@@ -9,18 +9,19 @@ Contains:
   - getRMS, getAlpha, getAlphas : inversion helpers
   - _gn_solve          : Gauss-Newton normal equations solver
   - _backtrack         : step-halving bound enforcement
-  - _alpha_search      : log-spaced regularisation search with parabola backtrack
+  - _alpha_search      : log-spaced regularisation-strength ladder search
   - invert             : regularised Gauss-Newton inversion loop
 """
 
 import time as _time_mod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
 
 import numpy as np
 
 from .transform_weights import MU0, HANKEL_FILTERS, FOURIER_FILTERS, EULER_PARAMS
 from .backends import HAS_CUDA
-from .kernels_numba import HAS_NUMBA
+from .kernels_numba import HAS_NUMBA, KERNEL_MODES
 from .forward import (fwd_circle_central, fwd_square_central,
                       fwd_circle_offset, fwd_square_offset,
                       _precompute_filter_dlf, _precompute_filter_euler)
@@ -268,7 +269,7 @@ def getJ_ana(thicknesses, log_resistivities, tx_size, times,
              tx_height=0.0, rx_height=0.0,
              transform='dlf', hankel_filter='key_101',
              fourier_filter='key_81', euler_order=11,
-             jacobian_mode='log'):
+             jacobian_mode='log', kernel='exact'):
 
     """Analytical Jacobian  d(ln(-dBdt_i)) / d(ln rho_j)  for all loop geometries.
 
@@ -336,6 +337,8 @@ def getJ_ana(thicknesses, log_resistivities, tx_size, times,
     jacobian_mode     : str
         'log'      -> return d(ln(-dBdt))/d(ln rho) (default, legacy behavior)
         'absolute' -> return d(-dBdt)/d(ln rho)
+    kernel            : str, default 'exact'
+        Numba recursion: 'exact', 'fast_sqrt' or 'vectorized' (see kernels_numba)
 
     Returns
     -------
@@ -394,22 +397,22 @@ def getJ_ana(thicknesses, log_resistivities, tx_size, times,
             if _is_circle:
                 dbdt, J_raw = _tem_circular_grad_euler_jit(
                     times, thicknesses, resistivities, lam, lam_kern, MU0,
-                    e_eta, e_A, filter_weights)
+                    e_eta, e_A, filter_weights, KERNEL_MODES[kernel])
             else:
                 dbdt, J_raw = _tem_square_grad_euler_jit(
                     times, thicknesses, resistivities,
                     dist_q, area_w, float(quad_scale),
-                    h_base, h_j0, MU0, e_eta, e_A, filter_weights, altitude)
+                    h_base, h_j0, MU0, e_eta, e_A, filter_weights, altitude, KERNEL_MODES[kernel])
         else:
             if _is_circle:
                 dbdt, J_raw = _tem_circular_grad_jit(
                     times, thicknesses, resistivities, lam, lam_kern, MU0,
-                    f_base, f_sin, filter_weights)
+                    f_base, f_sin, filter_weights, KERNEL_MODES[kernel])
             else:
                 dbdt, J_raw = _tem_square_grad_jit(
                     times, thicknesses, resistivities,
                     dist_q, area_w, float(quad_scale),
-                    h_base, h_j0, MU0, f_base, f_sin, filter_weights, altitude)
+                    h_base, h_j0, MU0, f_base, f_sin, filter_weights, altitude, KERNEL_MODES[kernel])
 
     elif _use_gpu:
         # GPU path - full (n_t, n_f, K) tensor batched in one CuPy operation.
@@ -600,15 +603,38 @@ def getAlphas(alpha, thicknesses):
     return alpha * alpha_factor
 
 
-def getR(resistivities, damp=1e-4):
-    """First-order roughness (smoothness) matrix with optional damping."""
+def getR(resistivities, damp=1e-4, weights=None):
+    """First-order roughness (smoothness) matrix with optional damping.
+
+    Pass ``weights`` (see :func:`_irls_weights`) to reweight each first
+    difference row, turning the default L2 (smooth) penalty into an IRLS
+    approximation of an L1 (blocky / minimum-support) penalty.
+    """
     n_params = resistivities.size
     D = np.zeros((n_params - 1, n_params))
     for k in range(n_params - 1):
         D[k, k] = -1.0
         D[k, k + 1] = 1.0
-    R = D.T @ D + damp * np.eye(n_params)
+    DTD = D.T @ np.diag(weights) @ D if weights is not None else D.T @ D
+    R = DTD + damp * np.eye(n_params)
     return R
+
+
+def _irls_weights(m, beta=1e-2):
+    """IRLS row-weights approximating an L1 (blocky) roughness penalty.
+
+    Minimising ``sum(|D m|)`` (sparse/blocky layer-to-layer contrasts) is
+    approximated by iteratively reweighted least squares: each first
+    difference is weighted by ``1 / sqrt((D m)_k^2 + beta^2)``, so large
+    contrasts are penalised less than small ones -- unlike the fixed L2
+    penalty, which penalises every contrast equally regardless of size and
+    therefore always smooths across sharp boundaries. ``beta`` is a small
+    stabilising floor (in log-resistivity units) below which contrasts are
+    treated as smooth; smaller beta -> blockier results but a harder,
+    more nonlinear problem.
+    """
+    Dm = np.diff(np.asarray(m, dtype=float))
+    return 1.0 / np.sqrt(Dm ** 2 + beta ** 2)
 
 
 def getJ_fd(thicknesses, log_resistivities, tx_size, times,
@@ -726,15 +752,63 @@ def _backtrack(m, delta, ln_rho_min, ln_rho_max):
     return np.clip(m + step * delta, ln_rho_min, ln_rho_max), step
 
 
+def _trial_log_rms(obs_data, mod, w):
+    """Score all fitted gates; invalid trials must not win by dropping gates."""
+    if (np.size(mod) == 0 or np.any(~np.isfinite(mod)) or np.any(mod <= 0)
+            or np.any(~np.isfinite(obs_data)) or np.any(obs_data <= 0)
+            or np.any(~np.isfinite(w)) or np.any(w <= 0)):
+        return np.inf
+    residual = np.log(obs_data) - np.log(mod)
+    return float(np.sqrt(np.mean((w * residual) ** 2)))
+
+
+def _backtrack_rms(m, delta, ln_rho_min, ln_rho_max, fwd_fn, obs_data, w,
+                    rms_current, max_halving=6):
+    """Bounds backtrack (see :func:`_backtrack`), *then* shrink the step
+    further if it makes the fit worse than the current model.
+
+    ``_backtrack`` only guards against the trial model leaving
+    ``[ln_rho_min, ln_rho_max]``; a full Gauss-Newton step can still be
+    accepted even when the linearisation is poor (e.g. near a sharp
+    resistivity contrast) and the resulting RMS is far worse than before it.
+    Used per trial with ``step_backtrack=True``, or as a fallback after a
+    failed alpha ladder with ``step_backtrack='auto'``.
+    Halves the step length (like ``_backtrack``, but keyed on the RMS
+    rather than the bounds) until it no longer increases the RMS, or
+    ``max_halving`` halvings are exhausted (falls back to the smallest step
+    tried).
+    """
+    step = 1.0
+    trial = mod = rms = None
+    for i in range(max_halving + 1):
+        trial, actual_step = _backtrack(m, step * delta, ln_rho_min, ln_rho_max)
+        mod = fwd_fn(trial)
+        rms = _trial_log_rms(obs_data, mod, w)
+        if np.isfinite(rms) and (rms < rms_current or i == max_halving):
+            return trial, step * actual_step, mod, rms
+        if i == max_halving:
+            return trial, step * actual_step, mod, rms
+        step *= 0.5
+    return trial, actual_step, mod, rms
+
+
 def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                   thicknesses, fwd_fn, obs_data, w,
                   ln_rho_min, ln_rho_max, alpha_step=1/9, rms_current=np.inf,
-                  plot=False, verbose=True):
-    """Log-spaced alpha search with parabola backtrack to RMS = 1.
+                  plot=False, verbose=True, step_backtrack=False):
+    """Log-spaced regularisation-strength ladder search.
 
     Tests ``alpha_steps`` regularisation strengths starting from
-    ``alpha_start`` on a log-spaced ladder defined by ``getAlpha``, evaluates
-    the RMS for each, fits a polynomial, and locates alpha* where RMS = 1.
+    ``alpha_start`` on a log-spaced ladder defined by ``getAlpha`` and
+    evaluates the RMS for each, stopping early once a trial reaches RMS < 1
+    or the RMS stops improving. The caller picks the accepted trial (see
+    ``invert``/``invert_joint``): the strongest regularisation that still
+    reaches RMS <= 1, or the lowest-RMS trial if none did. Trailing the
+    ladder with a weaker step is deliberately incremental - true
+    convergence (RMS <= 1 on the accepted, freshly re-evaluated model) is
+    checked again at the top of the next outer iteration, so a trial that
+    undershoots RMS = 1 by a wide margin simply gets refined further next
+    time rather than being accepted outright.
 
     Parameters
     ----------
@@ -757,25 +831,37 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                               at least one alpha has improved on this value
     plot         : bool       show alpha-RMS diagnostic figure (default False)
     verbose      : bool       print the per-alpha RMS trace (default True)
+    step_backtrack : bool or 'auto'
+        False uses bounds-only steps. True backtracks each alpha trial.
+        'auto' first tries the normal ladder. Only if no trial improves RMS,
+        try up to six halvings of each of the two best bounds-safe steps,
+        stopping at the first improvement. No repeated full-step evaluation.
 
     Returns
     -------
-    alpha_hist : list of float    tested + parabola alpha values
+    alpha_hist : list of float    tested alpha values
     rms_hist   : list of float    corresponding RMS values
     delta_hist : list of ndarray  corresponding model deltas (m_trial - m)
     mod_hist   : list of ndarray  corresponding forward responses for each trial
     """
+    if step_backtrack not in (False, True, 'auto'):
+        raise ValueError("step_backtrack must be False, True, or 'auto'.")
+    if alpha_steps < 1:
+        raise ValueError('alpha_steps must be at least 1.')
     alpha_hist, rms_hist, delta_hist, mod_hist = [], [], [], []
 
     for i in range(alpha_steps):
         alpha = getAlpha(alpha_start, step=i, alpha_step=alpha_step)
         avs   = getAlphas(alpha, thicknesses)
         delta = _gn_solve(Jw, dw, R, avs, m)
-        trial, step = _backtrack(m, delta, ln_rho_min, ln_rho_max)
-        mod   = fwd_fn(trial)
-        valid = (obs_data > 0) & (mod > 0)
-        d_res = np.log(obs_data[valid]) - np.log(mod[valid])
-        rms   = np.sqrt(np.mean((w[valid] * d_res) ** 2))
+        if step_backtrack == True:
+            trial, step, mod, rms = _backtrack_rms(
+                m, delta, ln_rho_min, ln_rho_max, fwd_fn, obs_data, w,
+                rms_current=rms_current)
+        else:
+            trial, step = _backtrack(m, delta, ln_rho_min, ln_rho_max)
+            mod   = fwd_fn(trial)
+            rms   = _trial_log_rms(obs_data, mod, w)
         if verbose:
             print(f"    Alpha = {alpha:.2f},  RMS = {rms:.2f}"
                   + (f"  (step = {step:.2f})" if step < 1.0 else ""))
@@ -786,7 +872,7 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
 
         if rms < 1.0:
             if verbose:
-                print("    RMS below 1 - stopping for parabola fit.")
+                print("    RMS below 1 - stopping ladder.")
             break
 
         if len(rms_hist) > 1 and rms > rms_hist[-2] and min(rms_hist[:-1]) < rms_current:
@@ -794,56 +880,29 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                 print("    RMS increased - stopping alpha search early.")
             break
 
-    # Polynomial backtrack to find alpha* where RMS = 1 (only when below 1 is reached)
-    x_data = np.log10(np.array(alpha_hist))
-    y_data = np.array(rms_hist)
-    deg    = min(2, len(x_data) - 1)
-    parabola_alpha = None
-    coeffs         = None
-
-    if deg >= 1 and np.min(y_data) < 1.0:
-        coeffs         = np.polyfit(x_data, y_data, deg)
-        root_c         = coeffs.copy()
-        root_c[-1]    -= 1.0
-        roots          = np.roots(root_c)
-        x_lo, x_hi     = x_data.min() - 1.0, x_data.max() + 1.0
-        real_roots      = roots[np.abs(roots.imag) < 1e-10].real
-        valid_roots     = real_roots[(real_roots >= x_lo) & (real_roots <= x_hi)]
-
-        if valid_roots.size > 0:
-            parabola_x     = float(valid_roots.max())
-            parabola_alpha = 10.0 ** parabola_x
-            avs_par        = getAlphas(parabola_alpha, thicknesses)
-            delta_par      = _gn_solve(Jw, dw, R, avs_par, m)
-            trial_par, step_par = _backtrack(m, delta_par, ln_rho_min, ln_rho_max)
-            mod_par        = fwd_fn(trial_par)
-            valid_par      = (obs_data > 0) & (mod_par > 0)
-            d_par          = np.log(obs_data[valid_par]) - np.log(mod_par[valid_par])
-            rms_par        = np.sqrt(np.mean((w[valid_par] * d_par) ** 2))
+    if step_backtrack == 'auto' and min(rms_hist) >= rms_current:
+        candidates = np.argsort(rms_hist, kind='stable')[:2]
+        for candidate in candidates:
+            trial, step, mod, rms = _backtrack_rms(
+                m, 0.5 * delta_hist[candidate], ln_rho_min, ln_rho_max,
+                fwd_fn, obs_data, w, rms_current, max_halving=5)
+            alpha_hist.append(alpha_hist[candidate])
+            rms_hist.append(rms)
+            delta_hist.append(trial - m)
+            mod_hist.append(mod)
             if verbose:
-                print(f"    Fitted Alpha = {parabola_alpha:.3f}"
-                      f", Actual RMS = {rms_par:.3f}"
-                      + (f"  (step = {step_par:.2f})" if step_par < 1.0 else ""))
-            alpha_hist.append(parabola_alpha)
-            rms_hist.append(rms_par)
-            delta_hist.append(trial_par - m)
-            mod_hist.append(mod_par)
+                print(f"    Auto backtrack: RMS = {rms:.3f}, step = {0.5 * step:.4f}")
+            if rms < rms_current:
+                break
 
-    if plot and coeffs is not None:
+    if plot:
         import matplotlib.pyplot as _plt
+        x_data = np.log10(np.array(alpha_hist))
+        y_data = np.array(rms_hist)
         fig, ax = _plt.subplots(figsize=(5, 3.5))
-        x_fit = np.linspace(x_data.min() - 0.5, x_data.max() + 0.5, 300)
-        y_fit = np.polyval(coeffs, x_fit)
-        ax.plot(x_fit, y_fit, '-', color='C0', lw=1.5,
-                label=f'Degree-{deg} fit')
-        ax.plot(x_data, y_data, 'o', color='C1', zorder=5,
+        ax.plot(x_data, y_data, 'o-', color='C1', zorder=5,
                 label='Tested alphas')
         ax.axhline(1.0, color='k', ls='--', lw=1, label='RMS = 1 target')
-        if parabola_alpha is not None:
-            ax.axvline(np.log10(parabola_alpha), color='C2', ls='--', lw=1,
-                       label=f'$\\alpha^* = {parabola_alpha:.3g}$')
-            ax.plot(np.log10(parabola_alpha), 1.0, '*', color='C2',
-                    markersize=12, zorder=6)
         ax.set_xlabel('$\\log_{{10}}(\\alpha)$')
         ax.set_ylabel('RMS')
         ax.legend(fontsize=8)
@@ -870,12 +929,13 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
            waveform_n_quad=5,
            geometry='circle_central', n_quad=5,
            rx_x=0.0, rx_y=0.0, tx_height=0.0, rx_height=0.0,
-           circle_warmstart=False):
+           circle_warmstart=False, regularization='l2', l1_beta=1.0,
+           step_backtrack=False):
     """Regularised Gauss-Newton inversion for 1-D layered-earth TEM.
 
     Minimises  phi(m) = ||W (ln d_obs - ln d_pred(m))||^2 + alpha * m^T R m
-    using iterative Gauss-Newton updates with a log-spaced alpha search and
-    parabola backtrack to target RMS = 1.
+    using iterative Gauss-Newton updates with a log-spaced alpha ladder
+    search targeting RMS = 1.
 
     All optimisation is performed in log-resistivity space, so the forward
     function is always evaluated with ``resistivities = exp(m)``.
@@ -935,6 +995,23 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
     waveform_n_quad     : int    GL quadrature order for waveform convolution (default 5)
     tx_height           : float  Tx elevation above ground [m] (default 0.0)
     rx_height           : float  Rx elevation above ground [m] (default 0.0)
+    regularization      : 'l2' (default, smooth Occam-style) or 'l1' (IRLS
+                          approximation of a blocky/sharp-boundary penalty,
+                          see :func:`_irls_weights`)
+    l1_beta             : float  starting IRLS stabilising floor for
+                          regularization='l1' (default 1.0, deliberately
+                          large/stable); cooled down each iteration alongside
+                          alpha (floored at 1e-4) so the model progressively
+                          sharpens instead of fighting a fixed stabilisation
+                          level for the whole inversion
+    step_backtrack      : bool   opt-in RMS-based step-length backtracking
+                          (default False, preserves original behaviour): the
+                          plain bounds-only backtrack (`_backtrack`) can still
+                          accept a Gauss-Newton step that makes the RMS much
+                          worse (e.g. near a sharp resistivity contrast, where
+                          the linearisation is poor); with this on, the step
+                          is halved until it no longer increases the RMS
+                          (see :func:`_backtrack_rms`)
 
     Returns
     -------
@@ -997,6 +1074,8 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
             n_step=n_step, geometry=circ_geom, n_quad=1,
             rx_x=rx_x, rx_y=rx_y, tx_height=tx_height,
             rx_height=rx_height, circle_warmstart=False,
+            regularization=regularization, l1_beta=l1_beta,
+            step_backtrack=step_backtrack,
         )
         print(f'[circle_warmstart] Circle converged (RMS={ws["rms_history"][-1]:.3f}). '
               f'Running up to {maxit} square refinement steps...')
@@ -1018,6 +1097,8 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
             n_step=n_step, geometry=geometry, n_quad=n_quad,
             rx_x=rx_x, rx_y=rx_y, tx_height=tx_height,
             rx_height=rx_height, circle_warmstart=False,
+            regularization=regularization, l1_beta=l1_beta,
+            step_backtrack=step_backtrack,
         )
 
     ln_rho_min = np.log(float(rho_min))
@@ -1192,6 +1273,11 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
     model_history = [m.copy()]
     J_history     = [J0.copy()] if store_J else []
     J_cur         = J0
+    # L1 IRLS stabiliser is cooled alongside alpha: starting large (behaving
+    # like L2, for a stable first step) and shrinking each iteration lets the
+    # model progressively sharpen instead of being stuck fighting a fixed
+    # stabilisation level for the whole inversion.
+    l1_beta_it    = l1_beta
 
     t_loop = _time_mod.time()
     d_pred = d0  # reuse the forward response already computed above
@@ -1220,7 +1306,7 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
             if store_J:
                 J_history.append(J_cur.copy())
 
-        R  = getR(m)
+        R  = getR(m, weights=_irls_weights(m, beta=l1_beta_it) if regularization == 'l1' else None)
         Jw = J_cur * w[:, None]
         dw = res_log * w
 
@@ -1232,26 +1318,17 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
             alpha_step=alpha_step,
             rms_current=rms,
             plot=plot_alpha,
+            step_backtrack=step_backtrack,
         )
 
-        # Select best model update.
-        # When any search RMS dipped below 1 (overshoot), _alpha_search appended
-        # the parabola-adjusted model as the last entry.  Always prefer that entry
-        # so the update lands as close to RMS = 1 as possible - even if the
-        # parabola RMS ended up slightly above 1 (which the "below" filter would
-        # otherwise reject).
-        rms_arr   = np.array(rms_h)
-        overshoot = bool(np.any(rms_arr < 1.0))
-        if overshoot:
-            best_idx          = len(rms_h) - 1
-            raw_overshoot_rms = float(rms_arr[rms_arr < 1.0].min())
-            #print(f"  Overshoot (RMS = {raw_overshoot_rms:.3f})")
+        # Select the strongest regularisation that still reaches RMS <= 1;
+        # if none did, fall back to the lowest-RMS trial on the ladder.
+        rms_arr = np.array(rms_h)
+        below = rms_arr[rms_arr <= 1.0]
+        if below.size > 0:
+            best_idx = int(np.where(rms_arr == below.max())[0][-1])
         else:
-            below = rms_arr[rms_arr <= 1.0]
-            if below.size > 0:
-                best_idx = int(np.where(rms_arr == below.max())[0][-1])
-            else:
-                best_idx = int(np.argmin(rms_arr))
+            best_idx = int(np.argmin(rms_arr))
 
         # Stop if no alpha value improved the fit.
         if rms_h[best_idx] >= rms:
@@ -1263,16 +1340,12 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
         # weaker regularisation; shifting up by one step ensures the optimum
         # remains within the search window even if it drifts upward.
         alpha_start = alpha_h[best_idx] * (10.0 ** alpha_step)
+        if regularization == 'l1':
+            l1_beta_it = max(l1_beta_it * (10.0 ** -alpha_step), 1e-4)
 
         m = np.clip(m + delta_h[best_idx], ln_rho_min, ln_rho_max)
         d_pred = mod_h[best_idx]
         model_history.append(m.copy())
-
-        # The parabola step is terminal - stop immediately after applying it.
-        if overshoot:
-            rms_history.append(rms_h[best_idx])
-            #print(f"  Parabola applied - stopping.")
-            break
 
     # ---- Optional sensitivity ----
     sensitivity = None
@@ -1294,10 +1367,74 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
     }
 
 
+def compute_doi(weighted_log_jacobian, thicknesses, threshold=0.8,
+                conservative_threshold=1.2):
+    """Estimate sensitivity-based depth of investigation (DOI) in metres.
+
+    Uses the cumulative-sensitivity approach of Christiansen & Auken (2012).
+    ``weighted_log_jacobian`` must contain only data rows, with entries
+    d ln(predicted data) / d ln(resistivity) divided by relative data error.
+    Do not include regularization rows or normalize the columns.
+    ``thicknesses`` contains the N-1 finite layer thicknesses for N columns.
+
+    Absolute column sums are accumulated from the bottom upward. DOI is
+    interpolated at layer tops where this cumulative sensitivity crosses
+    the threshold. Defaults 0.8 and 1.2 give standard and more conservative
+    estimates; they are adjustable, not calibrated uncertainty bounds.
+
+    Returns a dict with ``standard``, ``conservative`` (metres),
+    ``standard_capped``, ``conservative_capped``, ``sensitivity``,
+    ``cumulative``, ``layer_tops``, and the two thresholds. A capped depth is
+    the top of the bottom half-space, not a resolved DOI within it. A
+    single half-space therefore has a depth cap of zero. A DOI of zero
+    without a cap means total sensitivity does not exceed the threshold.
+    This diagnostic does not establish that an inversion has converged.
+    """
+    weighted_log_jacobian = np.asarray(weighted_log_jacobian, dtype=float)
+    thicknesses = np.asarray(thicknesses, dtype=float)
+    if (weighted_log_jacobian.ndim != 2
+            or min(weighted_log_jacobian.shape) == 0
+            or not np.all(np.isfinite(weighted_log_jacobian))):
+        raise ValueError('weighted_log_jacobian must be a finite, nonempty 2D array.')
+    if (thicknesses.ndim != 1
+            or thicknesses.size != weighted_log_jacobian.shape[1] - 1
+            or not np.all(np.isfinite(thicknesses))
+            or np.any(thicknesses <= 0)):
+        raise ValueError('Provide N-1 finite positive thicknesses for N model layers.')
+    if (not np.isfinite(threshold) or not np.isfinite(conservative_threshold)
+            or not 0 < threshold <= conservative_threshold):
+        raise ValueError('Require 0 < threshold <= conservative_threshold, both finite.')
+
+    layer_tops = np.r_[0.0, np.cumsum(thicknesses)]
+    sensitivity = np.abs(weighted_log_jacobian).sum(axis=0)
+    cumulative = np.cumsum(sensitivity[::-1])[::-1]
+
+    def crossing(level):
+        if cumulative[0] <= level:
+            return 0.0, False
+        if cumulative[-1] >= level:
+            return float(layer_tops[-1]), True
+        return float(np.interp(level, cumulative[::-1], layer_tops[::-1])), False
+
+    standard, standard_capped = crossing(threshold)
+    conservative, conservative_capped = crossing(conservative_threshold)
+    return {
+        'standard': standard, 'conservative': conservative,
+        'standard_capped': standard_capped,
+        'conservative_capped': conservative_capped,
+        'sensitivity': sensitivity, 'cumulative': cumulative,
+        'layer_tops': layer_tops, 'threshold': float(threshold),
+        'conservative_threshold': float(conservative_threshold),
+    }
+
+
 def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
                  rx_x=0.0, rx_y=0.0, rho_min=0.1, rho_max=1e5,
                  alpha_steps=5, alpha_step=1 / 9, maxit=15, n_quad=5,
-                 use_numba=True, use_cuda=False, transform='dlf', verbose=True):
+                 use_numba=True, use_cuda=False, transform='dlf', verbose=True,
+                 step_backtrack='auto', calc_doi=False, doi_threshold=0.8,
+                 doi_conservative_threshold=1.2, doi_refinement=1,
+                 system_filter=None, kernel='exact'):
     """
     Joint Gauss-Newton inversion of one or more pre-gated datasets (e.g. a
     station's LM and HM soundings) sharing one layered-earth model.
@@ -1335,20 +1472,60 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
                  Set to False for clean output when running many stations in
                  parallel (e.g. from multiple threads), since the printed
                  trace is not thread-safe to redirect/capture per call.
+    step_backtrack : bool or 'auto', default 'auto'
+        Automatically try shorter steps only if the full alpha ladder fails
+        to improve RMS. True backtracks each trial; False disables RMS
+        backtracking. All modes retain bounds checks. See ``_alpha_search``.
+    calc_doi : bool, default False
+        Evaluate one extra Jacobian at the final model to compute DOI with
+        the same gates, noise weights, geometry, and transform as the fit.
+    doi_threshold, doi_conservative_threshold : float
+        Cumulative-sensitivity thresholds passed to ``compute_doi``.
+    doi_refinement : int, default 1
+        Subdivide each finite inversion layer into this many equal layers for
+        the DOI Jacobian only. Larger values provide finer DOI sampling
+        without changing the inversion model or forward response.
+    system_filter : callable or None
+        Shared receiver transfer function H(omega) for all fit systems.
+        Applied to both the step response and analytical Jacobian, including
+        DOI. Defaults to no filtering. Gate matrices must not already include
+        this receiver filter.
+    kernel : 'exact', 'fast_sqrt' or 'vectorized'
+        Numba recursion variant for forwards and Jacobians (see kernels_numba);
+        'vectorized' is ~2x faster with rounding-level differences.
 
     Returns
     -------
     dict with keys:
         'resistivities', 'log_resistivities' : final model
         'rms'          : final weighted log-RMS misfit
-        'n_iter'       : number of Gauss-Newton iterations taken
+        'n_iter'       : number of alpha searches attempted (at most maxit)
         'converged'    : bool, True if rms <= 1.0 was reached
+        'termination_reason' : 'converged', 'stalled', 'max_iterations',
+             or 'invalid_response'
+        'alpha_final'  : float or None, the regularisation strength applied
+             for the last accepted model update (None if no update was made)
         'observed'     : (n_d,) concatenated observed data (all fit_systems, in order)
         'predicted'    : (n_d,) concatenated final modelled data, same order/shape as 'observed'
         'n_gates'      : list of int, number of gates contributed by each fit_systems entry
+        'doi'          : ``compute_doi`` result plus 'valid' and 'reason', or
+                 None when calc_doi=False. Invalid predictions/weights
+                 give NaN depths and valid=False, preserving the fit.
     """
+    if step_backtrack not in (False, True, 'auto'):
+        raise ValueError("step_backtrack must be False, True, or 'auto'.")
+    if alpha_steps < 1 or maxit < 0:
+        raise ValueError('alpha_steps must be positive and maxit nonnegative.')
+    if (not isinstance(doi_refinement, (int, np.integer))
+            or isinstance(doi_refinement, bool) or doi_refinement < 1):
+        raise ValueError('doi_refinement must be a positive integer.')
     thicknesses = np.asarray(thicknesses, dtype=float)
     t_step = np.asarray(t_step, dtype=float)
+    # Only evaluate step times with a nonzero weight in some gate: the padded
+    # ends of the shared grid usually fall outside every gate (exact).
+    used = np.any(np.vstack([np.asarray(f['M']) for f in fit_systems]) != 0, axis=0)
+    t_step = t_step[used]
+    fit_systems = [dict(f, M=np.asarray(f['M'])[:, used]) for f in fit_systems]
     observed = np.concatenate([np.asarray(f['obs'], dtype=float) for f in fit_systems])
     noise_abs = np.concatenate([np.asarray(f['noise'], dtype=float) for f in fit_systems])
     weights = observed / noise_abs
@@ -1358,11 +1535,13 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
             return -fwd_square_offset(thicknesses, rho, tx_size, rx_x, rx_y, t_step,
                                       current=1.0, signal=-1, n_quad=n_quad,
                                       use_numba=use_numba, use_cuda=use_cuda,
-                                      transform=transform)
+                                      transform=transform, system_filter=system_filter,
+                                      kernel=kernel)
         return -fwd_circle_offset(thicknesses, rho, tx_size, rx_x, t_step,
                                   current=1.0, signal=-1,
                                   use_numba=use_numba, use_cuda=use_cuda,
-                                  transform=transform)
+                                  transform=transform, system_filter=system_filter,
+                                  kernel=kernel)
 
     def predict(log_rho):
         step = fwd_step(np.exp(log_rho))
@@ -1377,7 +1556,7 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
             thicknesses=thicknesses, log_resistivities=log_rho, tx_size=tx_size,
             times=t_step, geometry=geometry, rx_x=rx_x, rx_y=rx_y, n_quad=n_quad,
             use_numba=use_numba, use_cuda=use_cuda, transform=transform,
-            jacobian_mode='absolute')
+            jacobian_mode='absolute', system_filter=system_filter, kernel=kernel)
         gate_jac = np.vstack([f['M'] @ jac_abs for f in fit_systems])
         result = np.zeros_like(gate_jac)
         positive = pred > 0
@@ -1391,41 +1570,155 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
     rms, resid = weighted_log_rms(pred)
     weighted_jac = jacobian(model, pred) * weights[:, None]
     alpha = float(np.linalg.norm(weighted_jac.T @ (weights * resid), np.inf) + 1e-30)
-    converged = False
+    n_iter = 0
+    termination_reason = 'max_iterations'
+    alpha_applied = None  # the fitted alpha actually applied to the final model update
 
-    for n_iter in range(maxit):
-        pred = predict(model)
-        rms, resid = weighted_log_rms(pred)
-        if rms <= 1.0:
-            converged = True
+    # pred/rms/resid always describe the current model: the accepted trial's
+    # response is reused, and the initial Jacobian serves the first iteration.
+    for iteration in range(maxit):
+        if not np.isfinite(_trial_log_rms(observed, pred, weights)):
+            termination_reason = 'invalid_response'
             break
-        weighted_jac = jacobian(model, pred) * weights[:, None]
-        alpha_h, rms_h, delta_h, _ = _alpha_search(
+        if rms <= 1.0:
+            break
+        n_iter += 1
+        if weighted_jac is None:
+            weighted_jac = jacobian(model, pred) * weights[:, None]
+        alpha_h, rms_h, delta_h, mod_h = _alpha_search(
             alpha, alpha_steps, weighted_jac, weights * resid, roughness, model,
             thicknesses, predict, observed, weights, lower, upper,
-            alpha_step=alpha_step, rms_current=rms, plot=False, verbose=verbose)
-        rms_arr, alpha_arr = np.asarray(rms_h), np.asarray(alpha_h)
+            alpha_step=alpha_step, rms_current=rms, plot=False, verbose=verbose,
+            step_backtrack=step_backtrack)
+        # Select the strongest regularisation that still reaches RMS <= 1;
+        # if none did, fall back to the lowest-RMS trial on the ladder.
+        rms_arr = np.asarray(rms_h)
         acceptable = np.flatnonzero(rms_arr <= 1.0)
-        best = (int(acceptable[np.argmax(alpha_arr[acceptable])])
+        best = (int(acceptable[np.argmax(np.asarray(alpha_h)[acceptable])])
                 if acceptable.size else int(np.argmin(rms_arr)))
-        if rms_h[best] >= rms:
+        if not np.isfinite(rms_h[best]) or rms_h[best] >= rms:
+            termination_reason = 'stalled'
             break
         model = np.clip(model + delta_h[best], lower, upper)
+        alpha_applied = alpha_h[best]
         alpha = alpha_h[best] * 10.0 ** alpha_step
-    else:
-        n_iter = maxit
+        previous_rms = rms
+        pred = mod_h[best]
+        rms, resid = weighted_log_rms(pred)
+        weighted_jac = None
+        if rms_h[best] > 1.0 and previous_rms - rms_h[best] <= 1e-8 * max(1.0, previous_rms):
+            termination_reason = 'stalled'
+            break
 
-    final_pred = predict(model)
+    final_pred = pred
     final_rms, _ = weighted_log_rms(final_pred)
+    valid_response = np.isfinite(_trial_log_rms(observed, final_pred, weights))
+    converged = bool(valid_response and final_rms <= 1.0)
+    if converged:
+        termination_reason = 'converged'
+    elif not valid_response:
+        termination_reason = 'invalid_response'
+    doi = None
+    if calc_doi:
+        invalid_predictions = int(np.count_nonzero(~np.isfinite(final_pred) | (final_pred <= 0)))
+        invalid_weights = int(np.count_nonzero(~np.isfinite(weights) | (weights <= 0)))
+        if final_pred.size == 0 or invalid_predictions or invalid_weights:
+            reason = (f'DOI unavailable: {final_pred.size} gates, '
+                      f'{invalid_predictions} nonfinite/nonpositive predictions, '
+                      f'{invalid_weights} nonfinite/nonpositive data weights.')
+            doi = {
+                'standard': np.nan, 'conservative': np.nan,
+                'standard_capped': False, 'conservative_capped': False,
+                'sensitivity': np.full(model.size, np.nan),
+                'cumulative': np.full(model.size, np.nan),
+                'layer_tops': np.r_[0.0, np.cumsum(thicknesses)],
+                'threshold': float(doi_threshold),
+                'conservative_threshold': float(doi_conservative_threshold),
+                'valid': False, 'reason': reason,
+            }
+        else:
+            doi_thicknesses = np.repeat(thicknesses / doi_refinement,
+                                        doi_refinement)
+            doi_model = np.concatenate([
+                np.repeat(model[:-1], doi_refinement), model[-1:]])
+            doi_jac_abs = getJ_ana(
+                thicknesses=doi_thicknesses, log_resistivities=doi_model,
+                tx_size=tx_size, times=t_step, geometry=geometry, rx_x=rx_x,
+                rx_y=rx_y, n_quad=n_quad, use_numba=use_numba,
+                use_cuda=use_cuda, transform=transform,
+                jacobian_mode='absolute', system_filter=system_filter, kernel=kernel)
+            doi_gate_jac = np.vstack([f['M'] @ doi_jac_abs for f in fit_systems])
+            doi_jac = np.zeros_like(doi_gate_jac)
+            positive = final_pred > 0
+            doi_jac[positive] = doi_gate_jac[positive] / final_pred[positive, None]
+            doi = compute_doi(doi_jac * weights[:, None], doi_thicknesses,
+                              threshold=doi_threshold,
+                              conservative_threshold=doi_conservative_threshold)
+            doi['refinement'] = doi_refinement
+            doi.update(valid=True, reason='')
     return {
         'log_resistivities': model,
         'resistivities': np.exp(model),
         'rms': final_rms,
-        'n_iter': n_iter + 1,
-        'converged': converged or final_rms <= 1.0,
+        'n_iter': n_iter,
+        'converged': converged,
+        'termination_reason': termination_reason,
+        'alpha_final': alpha_applied,
         'observed': observed,
         'predicted': final_pred,
         'n_gates': [len(f['obs']) for f in fit_systems],
+        'doi': doi,
     }
+
+
+def invert_stations(station_ids, prepare_station, invert_kwargs=None,
+                    max_workers=1, progress_callback=None):
+    """Run the joint inversion for a collection of prepared stations.
+
+    ``prepare_station`` owns data-format-specific work. It receives one
+    station ID and returns a mapping with a required ``fit_systems`` entry and
+    optional metadata entries. The fit systems are passed to
+    :func:`invert_joint`; metadata is copied onto that station's result.
+    """
+    station_ids = list(station_ids)
+    invert_kwargs = dict(invert_kwargs or {})
+    if max_workers < 1:
+        raise ValueError('max_workers must be positive.')
+    if 'fit_systems' in invert_kwargs:
+        raise ValueError("invert_kwargs must not contain 'fit_systems'.")
+
+    def run_station(station):
+        prepared = prepare_station(station)
+        if not isinstance(prepared, dict) or 'fit_systems' not in prepared:
+            raise TypeError("prepare_station must return a dict with 'fit_systems'.")
+        station_t0 = _time_mod.perf_counter()
+        result = invert_joint(prepared['fit_systems'], **invert_kwargs)
+        result = dict(result)
+        result['station'] = station
+        result.update({key: value for key, value in prepared.items()
+                       if key != 'fit_systems'})
+        result['elapsed_s'] = _time_mod.perf_counter() - station_t0
+        return result
+
+    results = {}
+    total = len(station_ids)
+    if max_workers == 1:
+        for completed, station in enumerate(station_ids, start=1):
+            result = run_station(station)
+            results[station] = result
+            if progress_callback is not None:
+                progress_callback(completed, total, result)
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(run_station, station): station
+                       for station in station_ids}
+            for completed, future in enumerate(as_completed(futures), start=1):
+                station = futures[future]
+                result = future.result()
+                results[station] = result
+                if progress_callback is not None:
+                    progress_callback(completed, total, result)
+
+    return {station: results[station] for station in station_ids}
 
 

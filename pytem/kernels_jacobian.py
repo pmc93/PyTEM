@@ -61,70 +61,158 @@ except ImportError:
 # ============================================================================
 
 if HAS_NUMBA:
+    from .kernels_numba import _csqrt
+
+    @nb.njit(fastmath=True, **_NB_OPTS)
+    def _te_rte_grad_vec_jit(lam, omega, thicknesses, resistivities, mu0):
+        """_te_rte_grad_jit with the wavenumber loop innermost so it vectorises."""
+        n, L = len(resistivities), len(lam)
+        term = 1j * omega * mu0 / resistivities
+        G = np.empty((n, L), dtype=np.complex128)
+        dG = np.empty((n, L), dtype=np.complex128)
+        E = np.zeros((n, L), dtype=np.complex128)
+        psi = np.zeros((n, L), dtype=np.complex128)
+        below = np.zeros((n, L), dtype=np.complex128)
+        att = np.zeros(L)
+        depth = n
+        for j in range(n):
+            if j > 0 and resistivities[j] == resistivities[j - 1]:
+                G[j], dG[j] = G[j - 1], dG[j - 1]
+            else:
+                for m in range(L):
+                    G[j, m] = _csqrt(lam[m] * lam[m] + term[j])
+                    dG[j, m] = -0.5 * term[j] / G[j, m]
+            if j == n - 1:
+                break
+            lowest = 1e300
+            for m in range(L):
+                att[m] += 2.0 * thicknesses[j] * G[j, m].real
+                E[j, m] = 0.0 if att[m] > 50.0 else np.exp(-2.0 * thicknesses[j] * G[j, m])
+                lowest = min(lowest, att[m])
+            if lowest > 50.0:
+                depth = j + 1
+                break
+
+        R = np.zeros(L, dtype=np.complex128)
+        for j in range(depth - 1, -1, -1):
+            below[j] = R
+            if j > 0 and resistivities[j] == resistivities[j - 1]:
+                for m in range(L):
+                    R[m] *= E[j, m]
+                continue
+            for m in range(L):
+                above = lam[m] + 0j if j == 0 else G[j - 1, m]
+                psi[j, m] = (above - G[j, m]) / (above + G[j, m])
+                rd = R[m] * E[j, m]
+                R[m] = (psi[j, m] + rd) / (1.0 + psi[j, m] * rd)
+
+        dr_te = np.zeros((n, L), dtype=np.complex128)
+        A = np.ones(L, dtype=np.complex128)
+        for j in range(depth):
+            h2 = -2.0 * thicknesses[j] if j < n - 1 else 0.0
+            if j > 0 and resistivities[j] == resistivities[j - 1]:
+                for m in range(L):  # psi = 0, above = gamma: 1/(above+gamma)^2 = 1/(4 gamma^2)
+                    bd = below[j, m] * E[j, m]
+                    q = A[m] * (1.0 - bd * bd) / (2.0 * G[j, m]) * dG[j, m]
+                    dr_te[j, m] += A[m] * below[j, m] * h2 * E[j, m] * dG[j, m] - q
+                    dr_te[j - 1, m] += q
+                    A[m] *= E[j, m]
+                continue
+            for m in range(L):
+                above = lam[m] + 0j if j == 0 else G[j - 1, m]
+                p, bd = psi[j, m], below[j, m] * E[j, m]
+                inv2 = 1.0 / ((1.0 + p * bd) * (1.0 + p * bd))
+                dpsi = (1.0 - bd * bd) * inv2
+                sum2 = (above + G[j, m]) * (above + G[j, m])
+                one_p2 = (1.0 - p * p) * inv2
+                dr_te[j, m] += A[m] * (-2.0 * above / sum2 * dpsi
+                                       + below[j, m] * one_p2 * h2 * E[j, m]) * dG[j, m]
+                if j > 0:
+                    dr_te[j - 1, m] += A[m] * dpsi * 2.0 * G[j, m] / sum2 * dG[j - 1, m]
+                A[m] *= E[j, m] * one_p2
+        return R, dr_te
 
     @nb.njit(**_NB_OPTS)
-    def _te_rte_grad_jit(lam, omega, thicknesses, resistivities, mu0):
+    def _te_rte_grad_jit(lam, omega, thicknesses, resistivities, mu0, mode=0):
         """Upward recursion + adjoint gradient - single omega, scalar loops (Numba JIT).
 
         Returns r_te (K,) and dr_te (N, K) = d(r_TE)/d(ln rho_j) for all layers.
         Handles both real (DLF) and complex (Euler) omega natively.
+        Same exact shortcuts as _te_rte_jit: e^-50 attenuation cutoff (deeper
+        derivatives are zero in double precision) and reuse of repeated layers.
         """
+        if mode == 2:
+            return _te_rte_grad_vec_jit(lam, omega, thicknesses, resistivities, mu0)
         n_lay = len(resistivities)
         n_lam = len(lam)
-        sval  = 1j * omega
+        prod = 1j * omega * mu0 / resistivities
+        same = np.zeros(n_lay, dtype=np.bool_)
+        for j in range(1, n_lay):
+            same[j] = resistivities[j] == resistivities[j - 1]
 
-        Gamma  = np.empty((n_lay, n_lam), dtype=np.complex128)
-        dGamma = np.empty((n_lay, n_lam), dtype=np.complex128)
-        for j in range(n_lay):
-            sigma_j = 1.0 / resistivities[j]
-            prod    = sval * mu0 * sigma_j
-            for m in range(n_lam):
-                g            = np.sqrt(lam[m]**2 + prod)
-                Gamma[j, m]  = g
-                dGamma[j, m] = -prod / (2.0 * g)
-
-        r_te  = np.empty(n_lam, dtype=np.complex128)
+        G = np.empty(n_lay, dtype=np.complex128)
+        dG = np.empty(n_lay, dtype=np.complex128)
+        E = np.empty(n_lay, dtype=np.complex128)
+        psi_s = np.empty(n_lay, dtype=np.complex128)
+        gb_s = np.empty(n_lay, dtype=np.complex128)
+        r_te = np.empty(n_lam, dtype=np.complex128)
         dr_te = np.zeros((n_lay, n_lam), dtype=np.complex128)
 
-        psi_s = np.empty(n_lay, dtype=np.complex128)
-        e_s   = np.empty(n_lay, dtype=np.complex128)
-        gb_s  = np.empty(n_lay, dtype=np.complex128)
-
         for m in range(n_lam):
+            depth, att = n_lay, 0.0
+            for j in range(n_lay):
+                if same[j]:
+                    G[j], dG[j] = G[j - 1], dG[j - 1]
+                else:
+                    z = lam[m]**2 + prod[j]
+                    G[j] = _csqrt(z) if mode == 1 else np.sqrt(z)
+                    dG[j] = -prod[j] / (2.0 * G[j])
+                if j == n_lay - 1:
+                    E[j] = 0.0
+                    break
+                E[j] = E[j - 1] if same[j] and thicknesses[j] == thicknesses[j - 1] \
+                    else np.exp(-2.0 * G[j] * thicknesses[j])
+                att += 2.0 * thicknesses[j] * G[j].real
+                if att > 50.0:
+                    E[j] = 0.0
+                    depth = j + 1
+                    break
+
             # Upward recursion (paper Eq. 2): gamma_N = 0 ... r_TE = gamma_0.
             gamma = 0.0 + 0.0j
-            for j in range(n_lay - 1, -1, -1):
-                G_above = (lam[m] + 0.0j) if j == 0 else Gamma[j - 1, m]
-                Gj = Gamma[j, m]
-                psi = (G_above - Gj) / (G_above + Gj)
-                if j < n_lay - 1:
-                    E = np.exp(-2.0 * Gj * thicknesses[j])
-                else:
-                    E = 0.0 + 0.0j
-                gb_s[j]  = gamma
+            for j in range(depth - 1, -1, -1):
+                gb_s[j] = gamma
+                if same[j]:
+                    psi_s[j] = 0.0
+                    gamma *= E[j]
+                    continue
+                G_above = (lam[m] + 0.0j) if j == 0 else G[j - 1]
+                psi = (G_above - G[j]) / (G_above + G[j])
                 psi_s[j] = psi
-                e_s[j]   = E
-                gamma = (psi + gamma * E) / (1.0 + psi * gamma * E)
+                gamma = (psi + gamma * E[j]) / (1.0 + psi * gamma * E[j])
             r_te[m] = gamma
 
             # Adjoint backward pass; contributions scaled by dGamma/d(ln rho).
             ladj = 1.0 + 0.0j
-            for j in range(n_lay):
-                G_above = (lam[m] + 0.0j) if j == 0 else Gamma[j - 1, m]
-                Gj = Gamma[j, m]
-                psi = psi_s[j]; E = e_s[j]; g = gb_s[j]
-                den2 = (1.0 + psi * g * E)**2
-                dg_dpsi = (1.0 - (g * E)**2) / den2
+            for j in range(depth):
+                Gj, g, Ej = G[j], gb_s[j], E[j]
+                dE_dGj = -2.0 * thicknesses[j] * Ej if j < n_lay - 1 else 0.0 + 0.0j
+                if same[j]:  # psi = 0 and G_above = Gj: 1/(G_above + Gj)^2 = 1/(4 Gj^2)
+                    q = ladj * (1.0 - (g * Ej)**2) / (2.0 * Gj) * dG[j]
+                    dr_te[j, m] += ladj * g * dE_dGj * dG[j] - q
+                    dr_te[j - 1, m] += q
+                    ladj = ladj * Ej
+                    continue
+                G_above = (lam[m] + 0.0j) if j == 0 else G[j - 1]
+                psi = psi_s[j]
+                den2 = (1.0 + psi * g * Ej)**2
+                dg_dpsi = (1.0 - (g * Ej)**2) / den2
                 dg_dE   = g * (1.0 - psi**2) / den2
-                dg_dgb  = E * (1.0 - psi**2) / den2
+                dg_dgb  = Ej * (1.0 - psi**2) / den2
                 dpsi_dGj = -2.0 * G_above / (G_above + Gj)**2
-                if j < n_lay - 1:
-                    dE_dGj = -2.0 * thicknesses[j] * E
-                else:
-                    dE_dGj = 0.0 + 0.0j
-                dr_te[j, m] += ladj * (dg_dpsi * dpsi_dGj + dg_dE * dE_dGj) * dGamma[j, m]
+                dr_te[j, m] += ladj * (dg_dpsi * dpsi_dGj + dg_dE * dE_dGj) * dG[j]
                 if j >= 1:
-                    dr_te[j - 1, m] += ladj * dg_dpsi * (2.0 * Gj / (G_above + Gj)**2) * dGamma[j - 1, m]
+                    dr_te[j - 1, m] += ladj * dg_dpsi * (2.0 * Gj / (G_above + Gj)**2) * dG[j - 1]
                 ladj = ladj * dg_dgb
 
         return r_te, dr_te
@@ -133,7 +221,7 @@ if HAS_NUMBA:
     def _tem_circular_grad_jit(times, thicknesses, resistivities,
                                lam, lam_hj1, mu0,
                                fourier_base, fourier_weights,
-                               filter_weights):
+                               filter_weights, mode=0):
         """Circle dB/dt + analytical Jacobian (Numba JIT, DLF).
 
         Works for circle_central and circle_offset - only lam_hj1 differs:
@@ -164,7 +252,7 @@ if HAS_NUMBA:
                 omega = fourier_base[k] / t
                 fw    = filter_weights[i, k]   # H(omega) for this gate/frequency
                 r_te, dr_te = _te_rte_grad_jit(
-                    lam, omega, thicknesses, resistivities, mu0)
+                    lam, omega, thicknesses, resistivities, mu0, mode)
                 hz_c = 0.0 + 0.0j
                 for m in range(n_lam):
                     hz_c += r_te[m] * lam_hj1[m]
@@ -185,7 +273,7 @@ if HAS_NUMBA:
                              dist_q, area_w, quad_scale,
                              h_base, h_j0, mu0,
                              fourier_base, fourier_weights,
-                             filter_weights, altitude=0.0):
+                             filter_weights, altitude=0.0, mode=0):
         """Square-loop dB/dt + analytical Jacobian (Numba JIT, DLF).
 
         Works for square_central (one-quadrant GL with quad_scale=4.0) and
@@ -224,7 +312,7 @@ if HAS_NUMBA:
                         if altitude != 0.0:
                             kern_q[m] *= np.exp(-lm * altitude)
                     r_te_q, dr_te_q = _te_rte_grad_jit(
-                        lam_q, omega, thicknesses, resistivities, mu0)
+                        lam_q, omega, thicknesses, resistivities, mu0, mode)
                     hz_c = 0.0 + 0.0j
                     for m in range(n_lam):
                         hz_c += r_te_q[m] * kern_q[m]
@@ -247,7 +335,7 @@ if HAS_NUMBA:
     @nb.njit(**_NB_OPTS)
     def _tem_circular_grad_euler_jit(times, thicknesses, resistivities,
                                      lam, lam_hj1, mu0, e_eta, e_A,
-                                     filter_weights):
+                                     filter_weights, mode=0):
         """Circle dB/dt + analytical Jacobian (Numba JIT, Euler-Stehfest).
 
         Uses complex Bromwich frequencies omega_k = k*pi/t - (A/2t)*i.
@@ -279,7 +367,7 @@ if HAS_NUMBA:
                 sign_k = (-1.0)**k * e_eta[k]
                 fw     = filter_weights[i, k]  # H(omega_k)
                 r_te, dr_te = _te_rte_grad_jit(
-                    lam, omega, thicknesses, resistivities, mu0)
+                    lam, omega, thicknesses, resistivities, mu0, mode)
                 hz_c = 0.0 + 0.0j
                 for m in range(n_lam):
                     hz_c += r_te[m] * lam_hj1[m]
@@ -300,7 +388,7 @@ if HAS_NUMBA:
     def _tem_square_grad_euler_jit(times, thicknesses, resistivities,
                                    dist_q, area_w, quad_scale,
                                    h_base, h_j0, mu0, e_eta, e_A,
-                                   filter_weights, altitude=0.0):
+                                   filter_weights, altitude=0.0, mode=0):
         """Square-loop dB/dt + analytical Jacobian (Numba JIT, Euler-Stehfest).
 
         filter_weights : (n_t, n_eval) complex128 - see _tem_circular_grad_euler_jit.
@@ -339,7 +427,7 @@ if HAS_NUMBA:
                         if altitude != 0.0:
                             kern_q[m] *= np.exp(-lm * altitude)
                     r_te_q, dr_te_q = _te_rte_grad_jit(
-                        lam_q, omega, thicknesses, resistivities, mu0)
+                        lam_q, omega, thicknesses, resistivities, mu0, mode)
                     hz_c = 0.0 + 0.0j
                     for m in range(n_lam):
                         hz_c += r_te_q[m] * kern_q[m]

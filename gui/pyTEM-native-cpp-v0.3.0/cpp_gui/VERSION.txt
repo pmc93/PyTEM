@@ -1,0 +1,16 @@
+pyTEM Native C++ Inversion GUI 0.3.0
+
+This source package includes:
+- DLF and Euler-11 forward transforms
+- analytical adjoint and finite-difference Jacobians
+- waveform/gate matrix convolution and band-pass filters
+- individual LM or HM inversion
+- joint LM+HM inversion against one shared layered-earth model
+- multiple-USF import and bounded parallel sounding inversion
+- shared in-memory and persistent first-iteration Jacobian cache
+- L1 blocky or L2 smooth regularization
+- 15-layer default with log-spaced 2-25 m thicknesses
+- previous/next navigation through soundings and recovered models
+
+The running application title must begin with:
+pyTEM Native C++ Inversion v0.3.0
