@@ -1,0 +1,19 @@
+# Builds and uploads to PyPI when a GitHub release is published. One-off setup:
+# add this repository as a "trusted publisher" of pytem on pypi.org.
+name: Publish to PyPI
+on:
+  release:
+    types: [published]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build && python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1

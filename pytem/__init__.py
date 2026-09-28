@@ -123,6 +123,8 @@ Inversion:
         optional: convolve_waveform(), system_filter=H, IP rho(omega)
 """
 
+__version__ = "0.1.0"
+
 from .transform_weights import MU0, HANKEL_FILTERS, FOURIER_FILTERS, EULER_PARAMS
 from .backends import HAS_CUDA
 from .kernels_numba import HAS_NUMBA
@@ -145,7 +147,6 @@ from .inversion import (getJ_ana, getJ_fd, getR, dbdt_to_apprho, getRMS,
                         compute_doi)
 from .plotter import (plot_sounding, plot_model, plot_inversion,
                       plot_survey_models, plot_survey_responses)
-from .benchmarks import benchmark_step_grids
 from .benchmarks import benchmark_step_grids
 from .data_io import (TEMData, KenbecTEMData, TunoeTEMData, read_tem_xyz, read_kenbec_xyz,
                       read_xyz, read_usf)

@@ -2,6 +2,11 @@
 
 1-D layered-earth Time-Domain Electromagnetic (TEM) modelling and inversion in Python.
 
+```
+pip install pytem
+pip install "pytem[gpu]"   # CUDA (CuPy); also [maps], [gerda], [all]
+```
+
 ---
 
 ## Overview

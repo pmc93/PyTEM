@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytem"
+dynamic = ["version"]
+description = "1-D layered-earth time-domain electromagnetic (TEM) forward modelling and inversion"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Paul McLachlan", email = "pamcl@dtu.dk" }]
+keywords = ["geophysics", "TEM", "TDEM", "electromagnetics", "inversion", "groundwater"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = ["numpy", "scipy", "pandas", "matplotlib", "numba"]
+
+[project.optional-dependencies]
+gpu = ["cupy-cuda12x"]
+maps = ["pyproj", "utm", "contextily", "matplotlib-scalebar"]
+gerda = ["fdb", "utm"]
+all = ["pytem[gpu,maps,gerda]"]
+
+[project.urls]
+Homepage = "https://github.com/pmc93/PyTEM"
+
+[tool.setuptools]
+packages = ["pytem"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pytem.__version__" }
