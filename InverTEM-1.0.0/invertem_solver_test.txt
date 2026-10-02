@@ -1,0 +1,14 @@
+# InverTEM solver settings for testing SCI constraint strengths.
+# Rename to invertem_solver.txt (beside InverTEM.exe) to use it. Every
+# combination of the comma-separated values runs in turn (here 3 x 3 x 2 = 18
+# runs) and is saved as its own model, named after its settings, so the
+# results can be compared per sounding, on the transect, and exported.
+# Each run takes as long as one SCI fast batch: test on a subset first.
+method = pytem_joint
+transform = euler
+sci_vertical_factor = 2, 3, 5          # resistivity factor allowed between adjacent layers (larger = looser)
+sci_lateral_factor = 1.5, 2.5, 4       # factor allowed between neighbours at the reference distance (larger = looser)
+sci_reference_distance = 100           # distance [m] at which sci_lateral_factor applies
+sci_distance_power = 0.5, 1            # lateral constraint loosens as (distance / reference)^power
+sci_constraints = elevation            # elevation | depth (both: "elevation, depth")
+sci_max_iterations = 30

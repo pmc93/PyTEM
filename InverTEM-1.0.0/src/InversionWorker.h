@@ -21,8 +21,10 @@ class InversionWorker final : public QObject
     Q_OBJECT
 
 public:
+    // sciRuns: SCI settings to invert with in turn (one result set each).
     explicit InversionWorker(std::vector<InversionJob> jobs,
-                             unsigned maximumParallelJobs = 0);
+                             unsigned maximumParallelJobs = 0,
+                             std::vector<pytem::SciSettings> sciRuns = {});
     void requestCancel();
 
 public slots:
@@ -37,5 +39,6 @@ signals:
 private:
     std::vector<InversionJob> m_jobs;
     unsigned m_maximumParallelJobs = 0;
+    std::vector<pytem::SciSettings> m_sciRuns;
     std::atomic_bool m_cancelled{false};
 };

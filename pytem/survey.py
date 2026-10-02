@@ -165,7 +165,7 @@ class Survey:
             _, axes = plt.subplots(len(lines), 1, figsize=figsize, sharey=True)
         axes = np.atleast_1d(axes)
 
-        for ax, line, line_number, color in zip(axes, lines, line_numbers, LINE_COLORS):
+        for ax, line in zip(axes, lines):
             mask = self.tem.line_mask(line)
             x = np.arange(mask.sum()) if x_axis == 'index' else self.tem.distance_along_line(line)
             for g in gates:
@@ -257,10 +257,13 @@ class Survey:
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
 
+        # Up to ten lines get their own colour and a legend; more are coloured in line order with a colour bar.
+        few_lines, few_stations = len(lines) <= len(LINE_COLORS), len(e) <= 500
+        colors = LINE_COLORS if few_lines else plt.cm.viridis(np.linspace(0, 1, len(lines)))
         for i, line in enumerate(lines):
             mask = self.tem.line_mask(line)
-            ax.scatter(e[mask], n[mask], c=LINE_COLORS[i % len(LINE_COLORS)], s=50,
-                      label=f'Line {line}', zorder=4, edgecolors='k', linewidths=0.5)
+            ax.scatter(e[mask], n[mask], color=colors[i], s=50 if few_stations else 6, label=f'Line {line}', zorder=4,
+                      edgecolors='k' if few_stations else 'none', linewidths=0.5)
         ax.set_aspect('equal')  # UTM meters: equal x/y scale so distances aren't distorted
 
         if basemap:
@@ -277,7 +280,13 @@ class Survey:
 
         ax.set_xlabel(f'Easting [m] (EPSG:{epsg})')
         ax.set_ylabel('Northing [m]')
-        ax.legend(title='Line', fontsize=8, loc='upper left', framealpha=0.8)
+        if few_lines:
+            ax.legend(title='Line', fontsize=8, loc='upper left', framealpha=0.8)
+        else:
+            bar = ax.figure.colorbar(plt.cm.ScalarMappable(norm=plt.Normalize(0, len(lines) - 1), cmap='viridis'),
+                                     ax=ax, label='Line', shrink=0.7)
+            ticks = np.linspace(0, len(lines) - 1, 6).round().astype(int)
+            bar.set_ticks(ticks, labels=[lines[k] for k in ticks])
         try:
             from matplotlib_scalebar.scalebar import ScaleBar
             ax.add_artist(ScaleBar(1, units='m', location='lower right', box_alpha=0.7))

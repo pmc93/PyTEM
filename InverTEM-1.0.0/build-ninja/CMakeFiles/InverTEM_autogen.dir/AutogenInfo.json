@@ -420,6 +420,12 @@
 			null
 		],
 		[
+			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/ElevationModel.h",
+			"MU",
+			"UVLADIE3JM/moc_ElevationModel.cpp",
+			null
+		],
+		[
 			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/InversionWorker.h",
 			"MU",
 			"UVLADIE3JM/moc_InversionWorker.cpp",
@@ -435,6 +441,12 @@
 			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MainWindow.h",
 			"MU",
 			"UVLADIE3JM/moc_MainWindow.cpp",
+			null
+		],
+		[
+			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MainWindowHelpers.h",
+			"MU",
+			"UVLADIE3JM/moc_MainWindowHelpers.cpp",
 			null
 		],
 		[
@@ -547,6 +559,11 @@
 			null
 		],
 		[
+			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/ElevationModel.cpp",
+			"MU",
+			null
+		],
+		[
 			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/InversionWorker.cpp",
 			"MU",
 			null
@@ -573,6 +590,11 @@
 		],
 		[
 			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/PlotWidget.cpp",
+			"MU",
+			null
+		],
+		[
+			"C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/Processing.cpp",
 			"MU",
 			null
 		],

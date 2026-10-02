@@ -206,6 +206,33 @@ result = pytem.invert(
 
 When both `analytical_j=True` and a waveform are provided, the waveform Jacobian is formed analytically using the chain rule: `∂G_i/∂(ln ρ_j) = conv(∂F/∂(ln ρ_j), w)_i`, avoiding N+1 full waveform convolution calls.
 
+**`invert_joint()`** inverts one or more gate-averaged datasets of a sounding (e.g. LM and HM) for one model. Options shared with the InverTEM C++ solver:
+
+| Option | Effect |
+|---|---|
+| `norm='l2'` / `'l1'` | smooth (squared steps between layers) or blocky (absolute steps, by IRLS) |
+| `half_space_start=True` | start from the best of 33 half-spaces, 1 Ωm to 10 kΩm |
+| `adaptive_alpha=True` | after a trial that undershoots RMS 1, one more at the α interpolated to RMS 1 |
+| `tx_height`, `rx_height` | transmitter and receiver heights above the ground |
+
+**`invert_sci()`** is the spatially constrained inversion (fast SCI, after Lupus): all soundings in one system, with constraints between adjacent layers and between Delaunay neighbours. Each constraint is "the difference in ln ρ is 0 ± ln(factor)":
+
+```python
+result = pytem.invert_sci(
+    stations,                 # list of fit_systems, one per sounding (as for invert_joint)
+    thicknesses, t_step, tx_size, geometry, x, y, elevation,
+    vertical_factor=3.0,      # ratio between adjacent layers that costs 1 STD
+    lateral_factor=1.5,       # ratio between neighbours that costs 1 STD, at reference_distance
+    reference_distance=100.0, distance_power=0.5,   # sigma scales as (d / reference)^power
+    adaptive=False,           # True: the tightest constraints that reach a total RMS of 1
+)
+# result keys: 'resistivities' (n_soundings, N), 'rms', 'runs', 'vertical_factor', 'lateral_factor', ...
+```
+
+`notebooks/10. pytem_regularisation.ipynb` compares L2, L1, SCI fast and SCI adaptive on one line of tTEM data.
+
+**Field data and errors (`data_io.py`):** `read_workbench_xyz(path, gex)` reads an Aarhus Workbench processed tTEM export with its `.gex` (waveforms, gate times, loop, coil position, heights, filters). `read_temcompany_xyz(path, lin)` reads a raw TEMcompany stb2xyz file into the same container, one row per sounding (consecutive LM and HM records paired); with a `.lin` line file, records outside the lines are dropped and soundings are named by line. `noise_model()` gives relative STDs from a dB/dt noise level per moment, `sqrt(base² + (N / I · (t / 1 ms)^-½ / |d|)²)`, and `estimate_noise_level()` takes that level from the data's own STDs.
+
 ---
 
 ### `ip_models.py`

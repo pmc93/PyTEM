@@ -1,5 +1,4 @@
-# Makes InverTEM_portable.zip (the exe with its runtime files in one folder) and
-# packs InverTEM.exe with its deployed Qt DLLs, plugins, icon and the MSVC
+# Packs InverTEM.exe with its deployed Qt DLLs, plugins, icon and the MSVC
 # runtime into one portable InverTEM_portable.exe using Enigma Virtual Box
 # (free, https://enigmaprotector.com/en/downloads.html). The packed files are
 # read from inside the exe; invertem_solver.txt, projects and reports are still
@@ -20,7 +19,7 @@ $skip = @("opengl32sw.dll", "d3dcompiler_47.dll", "dxcompiler.dll", "dxil.dll")
 $rootFiles = @(Get-ChildItem $appDir -File | Where-Object {
     ($_.Extension -eq ".dll" -and $skip -notcontains $_.Name.ToLower()) -or $_.Name -eq "g4.png" })
 $pluginDirs = @(Get-ChildItem $appDir -Directory | Where-Object {
-    $_.Name -notmatch '^(CMakeFiles|Testing|\.qt|.*_autogen|InverTEM_portable)$' -and
+    $_.Name -notmatch '^(CMakeFiles|Testing|\.qt|.*_autogen)$' -and
     (Get-ChildItem $_.FullName -Recurse -File -Filter *.dll | Select-Object -First 1) })
 
 # Microsoft C++ and OpenMP runtimes, so the target PC needs no redistributable:
@@ -36,28 +35,12 @@ if ($env:VCToolsRedistDir) {
         Where-Object { Test-Path $_ } | ForEach-Object { Get-Item $_ }
 }
 
-# Plain folder zip as well: it needs no unpacking at run time, so it also works
-# where antivirus or SmartScreen blocks the packed single-file exe.
-$zipDir = Join-Path $appDir "InverTEM_portable"
-if (Test-Path $zipDir) { Remove-Item $zipDir -Recurse -Force }
-New-Item -ItemType Directory $zipDir | Out-Null
-Copy-Item (Resolve-Path $AppExe) $zipDir
-$seenZip = @{}
-$rootFiles | Where-Object { -not $seenZip.ContainsKey($_.Name.ToLower()) -and ($seenZip[$_.Name.ToLower()] = $true) } |
-    ForEach-Object { Copy-Item $_.FullName $zipDir }
-$pluginDirs | ForEach-Object { Copy-Item $_.FullName $zipDir -Recurse }
-$zipFile = "$zipDir.zip"
-if (Test-Path $zipFile) { Remove-Item $zipFile -Force }
-Compress-Archive -Path $zipDir -DestinationPath $zipFile
-Remove-Item $zipDir -Recurse -Force
-Write-Host "Portable folder zip: $zipFile ($([math]::Round((Get-Item $zipFile).Length / 1MB, 1)) MB)"
-
 $console = @($env:ENIGMA_VB_CONSOLE,
              "$env:ProgramFiles\Enigma Virtual Box\enigmavbconsole.exe",
              "${env:ProgramFiles(x86)}\Enigma Virtual Box\enigmavbconsole.exe") |
     Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 if (-not $console) {
-    Write-Host "Enigma Virtual Box was not found, so only the zip was made (no single-file exe)."
+    Write-Host "Enigma Virtual Box was not found, so no portable single-file exe was made."
     Write-Host "Install it from https://enigmaprotector.com/en/downloads.html (or set ENIGMA_VB_CONSOLE)."
     exit 0
 }

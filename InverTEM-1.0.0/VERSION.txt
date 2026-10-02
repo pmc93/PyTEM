@@ -42,6 +42,7 @@ This source package includes:
 - SCI lateral constraints compare neighbours at the same elevation by default (sci_constraints = elevation | depth), interpolating the neighbour's model between layer mid-depths; general sparse constraint rows and per-sounding constraint blocks in the preconditioner
 - transect plots show four y-axis labels
 - SCI starts each sounding from its best homogeneous half-space (33 shared half-space responses, 1 Ohm m - 10 kOhm m) and computes the DOI with 3x layer refinement: about half the time and fewer iterations
+- L1/L2 (pyTEM joint) inversions also start from the best of 33 shared homogeneous half-spaces instead of 100 Ohm m: ~30 % fewer iterations on Tunoe line 5
 - inversion method read from invertem_solver.txt (pyTEM joint default; no GUI selector); NVIDIA GPU option in the Solver column; Layer model group replaces the Forward response column
 - waveform/gate matrix convolution and band-pass filters
 - individual LM or HM inversion
@@ -107,7 +108,7 @@ This source package includes:
 - previous/next navigation through soundings and recovered models
 - batch percentage and elapsed time, with ETA updates throttled to ten seconds
 - elapsed time refreshed every second independently of the throttled ETA
-- completed sounding markers filled and coloured by final RMS from 0.00 to 5.00
+- completed sounding markers filled and coloured by final RMS from 0.50 to 3.00
 - live RMS on the map: soundings still inverting show a ring coloured by the RMS after their latest iteration
 - automatic or user-defined resistivity plot limits with sensible logarithmic ticks
 - black plot-axis labels and two-decimal status reporting
@@ -118,6 +119,11 @@ This source package includes:
 - optional g4.png application icon copied beside the executable at build time
 - fixed internal iteration and alpha-trial counts with no menu controls
 - streamlined panels without Data, Geometry, System, Navigation, or Settings captions
+- Aarhus Workbench XYZ data import (tTEM): one sounding per DATE/TIME, system from a .gex or TEMcompany stb2xyz file beside it (or picked), else tTEM defaults
+- raw TEMcompany stb2xyz data import (one sounding per consecutive LM + HM record)
+- optional line file (.lin) for XYZ imports: data outside the lines (turns) are skipped
+- map and transect redrawn at most every 250 ms while results arrive (SCI batches finish up to 5x sooner); SCI conjugate-gradient steps run in parallel
+- model XYZ export always in UTM coordinates
 - one-click Windows configure-and-compile batch file that locates nvcc, initializes the MSVC x64 host compiler, auto-detects Qt's MSVC 2022 kit, refreshes stale CUDA or MinGW-Qt detection, and deploys the matching Qt runtime beside the executable (does not launch the GUI)
 
 The running application title is:

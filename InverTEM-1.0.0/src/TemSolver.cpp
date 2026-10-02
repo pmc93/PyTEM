@@ -1872,8 +1872,21 @@ InversionResult TemSolver::invertJoint(const InversionOptions &options,
 
     std::vector<double> predicted;
     Matrix jacobian;
-    // Every sounding of a system starts from the same model, so its step
-    // response and Jacobian are computed once and shared across the batch.
+    // Optionally start from the best of 33 homogeneous half-spaces (1 Ohm m to
+    // 10 kOhm m, 8 per decade), whose responses are shared across the batch.
+    if (options.halfSpaceStart) {
+        double best = std::numeric_limits<double>::infinity();
+        for (int g = 0; g <= 32; ++g) {
+            const std::vector<double> uniform(model.size(), std::clamp(std::log(10.0) * g / 8.0, lower, upper));
+            problem.evaluate(thicknesses, uniform, predicted, nullptr, true);
+            if (const double value = trialLogRms(observed, predicted, weights); value < best) {
+                best = value;
+                model = uniform;
+            }
+        }
+    }
+    // Soundings of a system that start from the same model share their first
+    // step response and Jacobian, computed once across the batch.
     problem.evaluate(thicknesses, model, predicted, &jacobian, true);
     double rmsValue = trialLogRms(observed, predicted, weights);
     auto weightedResidual = [&]() {
@@ -2022,6 +2035,48 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
     if (eastings.size() != S || northings.size() != S || elevations.size() != S)
         throw std::invalid_argument("SCI needs one position per sounding");
     const SciSettings &sci = soundings.front().sci;
+    if (sci.adaptive) {
+        const auto factor = [](double value) { std::ostringstream text; text << std::setprecision(3) << value; return text.str(); };
+        auto options = soundings;
+        const std::vector<double> scales{0.25, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0};
+        std::vector<InversionResult> results;
+        for (std::size_t k = 0; k < scales.size(); ++k) {
+            for (auto &o : options) {
+                o.sci = sci;
+                o.sci.adaptive = false;
+                o.sci.stopAtHalfFit = false; // a partly fitted run would leave poorly fitting lines behind
+                o.sci.verticalFactor = std::pow(sci.verticalFactor, scales[k]);
+                o.sci.lateralFactor = std::pow(sci.lateralFactor, scales[k]);
+            }
+            const std::string step = "adaptive " + std::to_string(k + 1) + "/" + std::to_string(scales.size())
+                + " (vertical " + factor(options.front().sci.verticalFactor) + ", lateral "
+                + factor(options.front().sci.lateralFactor) + "): ";
+            results = invertSci(options, eastings, northings, elevations, maximumThreads,
+                [&](std::size_t s, int iteration, double rms, const std::string &detail) {
+                    if (progress)
+                        progress(s, iteration, rms, step + detail);
+                }, cancelled);
+            // Total RMS, so lines that fit poorly count (the median would hide them).
+            double sum = 0.0, count = 0.0;
+            for (const auto &result : results)
+                if (!result.rmsHistory.empty()) {
+                    sum += std::pow(result.rmsHistory.back(), 2) * result.predicted.size();
+                    count += static_cast<double>(result.predicted.size());
+                }
+            if (count > 0.0 && std::sqrt(sum / count) <= 1.0)
+                break;
+            for (std::size_t s = 0; s < S; ++s) { // the next, looser run starts here
+                options[s].model.resistivities = results[s].resistivities;
+                options[s].halfSpaceStart = false;
+            }
+        }
+        for (auto &result : results) {
+            result.sci.adaptive = true;
+            result.message = "SCI adaptive (vertical " + factor(result.sci.verticalFactor) + ", lateral "
+                + factor(result.sci.lateralFactor) + "): " + result.message;
+        }
+        return results;
+    }
     const auto &thicknesses = soundings.front().model.thicknesses;
     const std::size_t L = soundings.front().model.resistivities.size();
     for (const auto &options : soundings) {
@@ -2050,9 +2105,9 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
 
     // Constraint rows sum(c_k m_k) with weight 1/sigma^2, applied as C^T C:
     // vertical rows between adjacent layers, and lateral rows between Delaunay
-    // neighbours that compare each layer with the neighbour's log-resistivity
-    // at the same elevation (interpolated between its layer mid-depths) or,
-    // with elevation constraints off, at the same depth below the surface.
+    // neighbours. With elevation constraints each layer is compared with the
+    // neighbour's layers it intersects at the same elevation, weighted by the
+    // overlap; otherwise layer by layer at the same depth below the surface.
     struct Row {
         std::vector<std::pair<std::size_t, double>> terms;
         double weight;
@@ -2063,24 +2118,25 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
     for (std::size_t s = 0; s < S; ++s)
         for (std::size_t j = 0; j + 1 < L; ++j)
             rows.push_back({{{s * L + j, -1.0}, {s * L + j + 1, 1.0}}, vertical, s, s});
-    std::vector<double> mids; // layer mid-depths; the half-space one a last-layer half-thickness down
-    double top = 0.0;
-    for (const double h : thicknesses) {
-        mids.push_back(top + 0.5 * h);
-        top += h;
-    }
-    mids.push_back(top + (thicknesses.empty() ? 1.0 : 0.5 * thicknesses.back()));
-    auto modelAtDepth = [&](std::size_t q, double depth) -> std::vector<std::pair<std::size_t, double>> {
-        if (depth < 0.0)
-            return {}; // above the neighbour's ground surface
-        if (depth <= mids.front())
-            return {{q * L, 1.0}};
-        for (std::size_t k = 0; k + 1 < L; ++k)
-            if (depth <= mids[k + 1]) {
-                const double f = (depth - mids[k]) / (mids[k + 1] - mids[k]);
-                return {{q * L + k, 1.0 - f}, {q * L + k + 1, f}};
+    // Layer j spans [tops[j], tops[j + 1]] below the surface; the half-space is
+    // given the last layer's thickness on the own side and no bottom on the other.
+    std::vector<double> tops{0.0};
+    for (const double h : thicknesses)
+        tops.push_back(tops.back() + h);
+    const double halfSpace = thicknesses.empty() ? 1.0 : thicknesses.back();
+    auto overlapTerms = [&](std::size_t q, double upper, double lower) {
+        std::vector<std::pair<std::size_t, double>> terms;
+        double total = 0.0;
+        for (std::size_t k = 0; k < L; ++k) {
+            const double overlap = std::min(lower, k + 1 < L ? tops[k + 1] : lower) - std::max(upper, tops[k]);
+            if (overlap > 0.0) {
+                terms.push_back({q * L + k, overlap});
+                total += overlap;
             }
-        return {{q * L + L - 1, 1.0}};
+        }
+        for (auto &term : terms)
+            term.second /= total;
+        return terms; // empty above the neighbour's ground surface
     };
     for (const auto &[a, b] : delaunayEdges(eastings, northings)) {
         const double distance = std::max(1.0, std::hypot(eastings[a] - eastings[b], northings[a] - northings[b]));
@@ -2094,7 +2150,8 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
         // From each side, so the pair stays symmetric; on flat ground this equals the depth rows.
         for (const auto &[p, q] : {std::pair{a, b}, std::pair{b, a}})
             for (std::size_t j = 0; j < L; ++j) {
-                auto terms = modelAtDepth(q, elevations[q] - (elevations[p] - mids[j]));
+                const double shift = elevations[q] - elevations[p];
+                auto terms = overlapTerms(q, tops[j] + shift, (j + 1 < L ? tops[j + 1] : tops[j] + halfSpace) + shift);
                 if (terms.empty())
                     continue;
                 terms.push_back({p * L + j, -1.0});
@@ -2169,7 +2226,7 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
     // from 1 Ohm m to 10 kOhm m (8 per decade). A half-space step response
     // depends only on the system, so each is computed once per system and
     // shared by every sounding, which only gates it and scores its log RMS.
-    {
+    if (soundings.front().halfSpaceStart) {
         std::vector<double> bestRms(S, std::numeric_limits<double>::infinity());
         for (int g = 0; g <= 32; ++g) {
             const std::vector<double> uniform(L, std::clamp(std::log(10.0) * g / 8.0, lower, upper));
@@ -2271,8 +2328,10 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
                 }
                 factors[s] = std::move(m);
             }, true);
+            // The per-sounding parts of each CG iteration run in parallel; the
+            // sparse constraint product (scattered writes) stays serial.
             auto precondition = [&](const std::vector<double> &r, std::vector<double> &z) {
-                for (std::size_t s = 0; s < S; ++s) {
+                parallelFor(S, threads, [&](std::size_t s) {
                     const auto &f = factors[s];
                     double *v = &z[s * L];
                     for (std::size_t j = 0; j < L; ++j) {
@@ -2286,16 +2345,17 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
                             v[j] -= f[k][j] * v[k];
                         v[j] /= f[j][j];
                     }
-                }
+                });
             };
             auto apply = [&](const std::vector<double> &x, std::vector<double> &y) {
-                for (std::size_t s = 0; s < S; ++s)
+                parallelFor(S, threads, [&](std::size_t s) {
                     for (std::size_t a = 0; a < L; ++a) {
                         double v = lambda * x[s * L + a];
                         for (std::size_t b = 0; b < L; ++b)
                             v += blocks[s][a][b] * x[s * L + b];
                         y[s * L + a] = v;
                     }
+                });
                 addConstraints(x, y);
                 for (std::size_t i = 0; i < y.size(); ++i)
                     if (!moves(i / L))
@@ -2402,7 +2462,7 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
                     count += problems[s]->observed.size();
                 }
             const double totalRms = count > 0.0 ? std::sqrt(sum / count) : 0.0;
-            if (acceptedMedian <= 1.0) { // half the soundings fit: stop before the rest over-fit
+            if (sci.stopAtHalfFit && acceptedMedian <= 1.0) { // half the soundings fit: stop before the rest over-fit
                 finished = true;
                 termination = "median RMS below 1";
             }
@@ -2421,6 +2481,7 @@ std::vector<InversionResult> TemSolver::invertSci(const std::vector<InversionOpt
         auto &result = results[s];
         const std::vector<double> slice(model.begin() + s * L, model.begin() + (s + 1) * L);
         result.iterations = iterations;
+        result.sci = sci;
         result.predicted = predicted[s];
         result.resistivities.resize(L);
         std::transform(slice.begin(), slice.end(), result.resistivities.begin(), [](double v) { return std::exp(v); });

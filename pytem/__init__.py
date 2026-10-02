@@ -144,12 +144,13 @@ from .system_filter import butterworth_filter, cascade_filter
 from .euler import euler_invert
 from .inversion import (getJ_ana, getJ_fd, getR, dbdt_to_apprho, getRMS,
                         getAlpha, getAlphas, invert, invert_joint, invert_stations,
-                        compute_doi)
+                        invert_sci, compute_doi)
 from .plotter import (plot_sounding, plot_model, plot_inversion,
                       plot_survey_models, plot_survey_responses)
 from .benchmarks import benchmark_step_grids
 from .data_io import (TEMData, KenbecTEMData, TunoeTEMData, read_tem_xyz, read_kenbec_xyz,
-                      read_xyz, read_usf)
+                      read_xyz, read_usf, read_workbench_xyz, read_temcompany_xyz, noise_model,
+                      estimate_noise_level)
 from .survey import Survey
 
 from .ip_models import (
@@ -202,6 +203,8 @@ __all__ = [
     'getAlphas',
     'invert',
     'invert_joint',
+    'invert_stations',
+    'invert_sci',
     'compute_doi',
     # Plotting
     'plot_sounding',
@@ -215,5 +218,9 @@ __all__ = [
     'read_kenbec_xyz',
     'read_xyz',
     'read_usf',
+    'read_workbench_xyz',
+    'read_temcompany_xyz',
+    'noise_model',
+    'estimate_noise_level',
     'Survey',
 ]

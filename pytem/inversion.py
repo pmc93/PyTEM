@@ -11,6 +11,8 @@ Contains:
   - _backtrack         : step-halving bound enforcement
   - _alpha_search      : log-spaced regularisation-strength ladder search
   - invert             : regularised Gauss-Newton inversion loop
+  - invert_joint       : joint inversion of gate-averaged datasets (L2 or L1)
+  - invert_sci         : spatially constrained inversion of many soundings
 """
 
 import time as _time_mod
@@ -792,10 +794,52 @@ def _backtrack_rms(m, delta, ln_rho_min, ln_rho_max, fwd_fn, obs_data, w,
     return trial, actual_step, mod, rms
 
 
+def _fitted_alpha(alphas, rms):
+    """Alpha at which the trials' RMS crosses 1, or None without a bracket.
+
+    A quadratic through all trials in log10(alpha) (a line for two trials);
+    the largest root inside the bracketing pair is used, else the linear
+    interpolation of that pair.
+    """
+    x, y = np.log10(alphas), np.asarray(rms, dtype=float)
+    crossing = np.flatnonzero((y[:-1] - 1.0) * (y[1:] - 1.0) <= 0.0)
+    if crossing.size == 0 or not np.all(np.isfinite(y)):
+        return None
+    k = crossing[0]
+    roots = np.roots(np.polyfit(x, y - 1.0, min(2, x.size - 1)))
+    roots = roots[np.isreal(roots)].real
+    roots = roots[(roots >= min(x[k:k + 2])) & (roots <= max(x[k:k + 2]))]
+    if roots.size:
+        return float(10.0 ** roots.max())
+    if y[k + 1] == y[k]:
+        return None
+    return float(10.0 ** (x[k] + np.clip((1.0 - y[k]) / (y[k + 1] - y[k]), 0.0, 1.0) * (x[k + 1] - x[k])))
+
+
+def _step_functions(thicknesses, t_step, tx_size, geometry, rx_x, rx_y, n_quad, use_numba, use_cuda,
+                    transform, system_filter, kernel, tx_height, rx_height):
+    """Step response on ``t_step`` and its Jacobian d(step)/d(ln rho), as functions of ln(rho)."""
+    common = dict(use_numba=use_numba, use_cuda=use_cuda, transform=transform, system_filter=system_filter,
+                  kernel=kernel, tx_height=tx_height, rx_height=rx_height)
+
+    def step(log_rho):
+        if geometry == 'square_offset':
+            return -fwd_square_offset(thicknesses, np.exp(log_rho), tx_size, rx_x, rx_y, t_step,
+                                      current=1.0, signal=-1, n_quad=n_quad, **common)
+        return -fwd_circle_offset(thicknesses, np.exp(log_rho), tx_size, rx_x, t_step,
+                                  current=1.0, signal=-1, **common)
+
+    def jacobian(log_rho):
+        return getJ_ana(thicknesses=thicknesses, log_resistivities=log_rho, tx_size=tx_size, times=t_step,
+                        geometry=geometry, rx_x=rx_x, rx_y=rx_y, n_quad=n_quad, jacobian_mode='absolute', **common)
+
+    return step, jacobian
+
+
 def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                   thicknesses, fwd_fn, obs_data, w,
                   ln_rho_min, ln_rho_max, alpha_step=1/9, rms_current=np.inf,
-                  plot=False, verbose=True, step_backtrack=False):
+                  plot=False, verbose=True, step_backtrack=False, fit_target=False):
     """Log-spaced regularisation-strength ladder search.
 
     Tests ``alpha_steps`` regularisation strengths starting from
@@ -836,6 +880,10 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
         'auto' first tries the normal ladder. Only if no trial improves RMS,
         try up to six halvings of each of the two best bounds-safe steps,
         stopping at the first improvement. No repeated full-step evaluation.
+    fit_target   : bool       when a trial undershoots RMS 1 (below 0.995),
+                              run one more at the alpha interpolated to RMS 1
+                              (see ``_fitted_alpha``), so the smoothest model
+                              that fits can be kept
 
     Returns
     -------
@@ -850,8 +898,7 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
         raise ValueError('alpha_steps must be at least 1.')
     alpha_hist, rms_hist, delta_hist, mod_hist = [], [], [], []
 
-    for i in range(alpha_steps):
-        alpha = getAlpha(alpha_start, step=i, alpha_step=alpha_step)
+    def run_trial(alpha):
         avs   = getAlphas(alpha, thicknesses)
         delta = _gn_solve(Jw, dw, R, avs, m)
         if step_backtrack == True:
@@ -869,10 +916,16 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
         rms_hist.append(rms)
         delta_hist.append(trial - m)
         mod_hist.append(mod)
+        return rms
 
+    for i in range(alpha_steps):
+        rms = run_trial(getAlpha(alpha_start, step=i, alpha_step=alpha_step))
         if rms < 1.0:
             if verbose:
                 print("    RMS below 1 - stopping ladder.")
+            fitted = _fitted_alpha(alpha_hist, rms_hist) if fit_target and rms < 0.995 else None
+            if fitted is not None:
+                run_trial(fitted)
             break
 
         if len(rms_hist) > 1 and rms > rms_hist[-2] and min(rms_hist[:-1]) < rms_current:
@@ -1434,7 +1487,8 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
                  use_numba=True, use_cuda=False, transform='dlf', verbose=True,
                  step_backtrack='auto', calc_doi=False, doi_threshold=0.8,
                  doi_conservative_threshold=1.2, doi_refinement=1,
-                 system_filter=None, kernel='exact'):
+                 system_filter=None, kernel='exact', tx_height=0.0, rx_height=0.0,
+                 norm='l2', half_space_start=False, adaptive_alpha=False):
     """
     Joint Gauss-Newton inversion of one or more pre-gated datasets (e.g. a
     station's LM and HM soundings) sharing one layered-earth model.
@@ -1493,16 +1547,33 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
     kernel : 'exact', 'fast_sqrt' or 'vectorized'
         Numba recursion variant for forwards and Jacobians (see kernels_numba);
         'vectorized' is ~2x faster with rounding-level differences.
+    tx_height, rx_height : float
+        Transmitter and receiver heights above the ground [m].
+    norm : 'l2' or 'l1'
+        'l2' penalises squared steps between layers (smooth); 'l1' their
+        absolute value (blocky), by reweighting the roughness from the
+        current model every iteration (IRLS, epsilon 0.05).
+    half_space_start : bool
+        Start from the best of 33 half-spaces (1 Ohm m to 10 kOhm m) in
+        place of ``rho_start``.
+    adaptive_alpha : bool
+        When an alpha trial undershoots RMS 1, run one more at the alpha
+        interpolated to RMS 1 and keep the smoothest model that fits
+        (RMS up to 1.005) in place of the first trial below 1.
+
+    The inversion also stops ('stagnated') when the RMS improved by less
+    than 1 % over the last 5 iterations.
 
     Returns
     -------
     dict with keys:
         'resistivities', 'log_resistivities' : final model
         'rms'          : final weighted log-RMS misfit
+        'rms_history'  : RMS of the start model and after every iteration
         'n_iter'       : number of alpha searches attempted (at most maxit)
         'converged'    : bool, True if rms <= 1.0 was reached
-        'termination_reason' : 'converged', 'stalled', 'max_iterations',
-             or 'invalid_response'
+        'termination_reason' : 'converged', 'stalled', 'stagnated',
+             'max_iterations' or 'invalid_response'
         'alpha_final'  : float or None, the regularisation strength applied
              for the last accepted model update (None if no update was made)
         'observed'     : (n_d,) concatenated observed data (all fit_systems, in order)
@@ -1530,33 +1601,19 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
     noise_abs = np.concatenate([np.asarray(f['noise'], dtype=float) for f in fit_systems])
     weights = observed / noise_abs
 
-    def fwd_step(rho):
-        if geometry == 'square_offset':
-            return -fwd_square_offset(thicknesses, rho, tx_size, rx_x, rx_y, t_step,
-                                      current=1.0, signal=-1, n_quad=n_quad,
-                                      use_numba=use_numba, use_cuda=use_cuda,
-                                      transform=transform, system_filter=system_filter,
-                                      kernel=kernel)
-        return -fwd_circle_offset(thicknesses, rho, tx_size, rx_x, t_step,
-                                  current=1.0, signal=-1,
-                                  use_numba=use_numba, use_cuda=use_cuda,
-                                  transform=transform, system_filter=system_filter,
-                                  kernel=kernel)
+    step, jacobian_step = _step_functions(thicknesses, t_step, tx_size, geometry, rx_x, rx_y, n_quad, use_numba,
+                                          use_cuda, transform, system_filter, kernel, tx_height, rx_height)
 
     def predict(log_rho):
-        step = fwd_step(np.exp(log_rho))
-        return np.concatenate([f['M'] @ step for f in fit_systems])
+        response = step(log_rho)
+        return np.concatenate([f['M'] @ response for f in fit_systems])
 
     def weighted_log_rms(pred):
         residual = np.log(observed) - np.log(np.maximum(pred, 1e-300))
         return np.sqrt(np.mean((weights * residual) ** 2)), residual
 
     def jacobian(log_rho, pred):
-        jac_abs = getJ_ana(
-            thicknesses=thicknesses, log_resistivities=log_rho, tx_size=tx_size,
-            times=t_step, geometry=geometry, rx_x=rx_x, rx_y=rx_y, n_quad=n_quad,
-            use_numba=use_numba, use_cuda=use_cuda, transform=transform,
-            jacobian_mode='absolute', system_filter=system_filter, kernel=kernel)
+        jac_abs = jacobian_step(log_rho)
         gate_jac = np.vstack([f['M'] @ jac_abs for f in fit_systems])
         result = np.zeros_like(gate_jac)
         positive = pred > 0
@@ -1565,9 +1622,14 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
 
     lower, upper = np.log(float(rho_min)), np.log(float(rho_max))
     model = np.log(np.asarray(rho_start, dtype=float))
-    roughness = getR(rho_start)
+    roughness = getR(model)
+    target = 1.005 if adaptive_alpha else 1.0
+    if half_space_start:
+        model = min((np.full(model.size, np.clip(np.log(10.0) * g / 8.0, lower, upper)) for g in range(33)),
+                    key=lambda trial: _trial_log_rms(observed, predict(trial), weights))
     pred = predict(model)
     rms, resid = weighted_log_rms(pred)
+    rms_history = [rms]
     weighted_jac = jacobian(model, pred) * weights[:, None]
     alpha = float(np.linalg.norm(weighted_jac.T @ (weights * resid), np.inf) + 1e-30)
     n_iter = 0
@@ -1580,20 +1642,22 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
         if not np.isfinite(_trial_log_rms(observed, pred, weights)):
             termination_reason = 'invalid_response'
             break
-        if rms <= 1.0:
+        if rms <= target:
             break
         n_iter += 1
         if weighted_jac is None:
             weighted_jac = jacobian(model, pred) * weights[:, None]
+        if norm == 'l1':  # IRLS weights from the current model
+            roughness = getR(model, weights=_irls_weights(model, 0.05))
         alpha_h, rms_h, delta_h, mod_h = _alpha_search(
             alpha, alpha_steps, weighted_jac, weights * resid, roughness, model,
             thicknesses, predict, observed, weights, lower, upper,
             alpha_step=alpha_step, rms_current=rms, plot=False, verbose=verbose,
-            step_backtrack=step_backtrack)
-        # Select the strongest regularisation that still reaches RMS <= 1;
+            step_backtrack=step_backtrack, fit_target=adaptive_alpha)
+        # Select the strongest regularisation that still reaches the target RMS;
         # if none did, fall back to the lowest-RMS trial on the ladder.
         rms_arr = np.asarray(rms_h)
-        acceptable = np.flatnonzero(rms_arr <= 1.0)
+        acceptable = np.flatnonzero(rms_arr <= target)
         best = (int(acceptable[np.argmax(np.asarray(alpha_h)[acceptable])])
                 if acceptable.size else int(np.argmin(rms_arr)))
         if not np.isfinite(rms_h[best]) or rms_h[best] >= rms:
@@ -1606,14 +1670,18 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
         pred = mod_h[best]
         rms, resid = weighted_log_rms(pred)
         weighted_jac = None
-        if rms_h[best] > 1.0 and previous_rms - rms_h[best] <= 1e-8 * max(1.0, previous_rms):
+        rms_history.append(rms)
+        if rms_h[best] > target and previous_rms - rms_h[best] <= 1e-8 * max(1.0, previous_rms):
             termination_reason = 'stalled'
+            break
+        if len(rms_history) > 5 and rms_history[-6] - rms < 0.01 * rms_history[-6]:
+            termination_reason = 'stagnated'
             break
 
     final_pred = pred
     final_rms, _ = weighted_log_rms(final_pred)
     valid_response = np.isfinite(_trial_log_rms(observed, final_pred, weights))
-    converged = bool(valid_response and final_rms <= 1.0)
+    converged = bool(valid_response and final_rms <= target)
     if converged:
         termination_reason = 'converged'
     elif not valid_response:
@@ -1646,7 +1714,8 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
                 tx_size=tx_size, times=t_step, geometry=geometry, rx_x=rx_x,
                 rx_y=rx_y, n_quad=n_quad, use_numba=use_numba,
                 use_cuda=use_cuda, transform=transform,
-                jacobian_mode='absolute', system_filter=system_filter, kernel=kernel)
+                jacobian_mode='absolute', system_filter=system_filter, kernel=kernel,
+                tx_height=tx_height, rx_height=rx_height)
             doi_gate_jac = np.vstack([f['M'] @ doi_jac_abs for f in fit_systems])
             doi_jac = np.zeros_like(doi_gate_jac)
             positive = final_pred > 0
@@ -1660,6 +1729,7 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
         'log_resistivities': model,
         'resistivities': np.exp(model),
         'rms': final_rms,
+        'rms_history': rms_history,
         'n_iter': n_iter,
         'converged': converged,
         'termination_reason': termination_reason,
@@ -1722,3 +1792,213 @@ def invert_stations(station_ids, prepare_station, invert_kwargs=None,
     return {station: results[station] for station in station_ids}
 
 
+
+
+# ============================================================
+# Spatially constrained inversion
+# ============================================================
+
+def _neighbour_edges(x, y):
+    """Pairs of neighbouring soundings: the Delaunay edges.
+
+    Three far vertices are triangulated along with the soundings (as in a
+    Bowyer-Watson construction), which leaves out the long, thin triangles
+    along the hull that would tie distant soundings of a line together. A
+    sounding left without an edge is joined to its nearest neighbour.
+    """
+    from itertools import combinations
+    from scipy.spatial import Delaunay
+    n = len(x)
+    points = np.c_[x - np.mean(x) + 1e-7 * np.arange(n), y - np.mean(y) - 1.3e-7 * (np.arange(n) % 7)]  # jitter separates coincident points
+    extent = max(1.0, np.abs(points).max()) if n else 1.0
+    simplices = Delaunay(np.vstack([points, [[-40 * extent, -40 * extent], [40 * extent, -40 * extent], [0.0, 40 * extent]]])).simplices
+    edges = {tuple(sorted(pair)) for simplex in simplices.tolist() for pair in combinations(simplex, 2) if max(pair) < n}
+    for i in set(range(n)) - {i for edge in edges for i in edge}:
+        if n > 1:
+            distance = np.hypot(*(points - points[i]).T)
+            distance[i] = np.inf
+            edges.add(tuple(sorted((i, int(np.argmin(distance))))))
+    return sorted(edges)
+
+
+def invert_sci(stations, thicknesses, t_step, tx_size, geometry, x, y, elevation=None,
+               rx_x=0.0, rx_y=0.0, rho_start=None, rho_min=0.1, rho_max=1e5,
+               vertical_factor=3.0, lateral_factor=1.5, reference_distance=100.0, distance_power=0.5,
+               elevation_constraints=True, adaptive=False, maxit=30, stop_at_half_fit=True,
+               n_quad=5, use_numba=True, use_cuda=False, transform='dlf', system_filter=None,
+               kernel='exact', tx_height=0.0, rx_height=0.0, verbose=True):
+    """
+    Spatially constrained inversion (fast SCI, after Lupus): all soundings in
+    one system, with constraints between adjacent layers and between map
+    neighbours, and Marquardt damping set by a step-length limit.
+
+    Every constraint is "the difference in ln(rho) is 0 +/- sigma" with
+    sigma = ln(factor): ``vertical_factor`` between adjacent layers, and
+    ``lateral_factor`` between Delaunay neighbours ``reference_distance``
+    apart, loosening as (distance / reference_distance)^``distance_power``.
+    The data misfit is in ln(data), as in :func:`invert_joint`.
+
+    Parameters
+    ----------
+    stations : list of ``fit_systems`` lists, one per sounding (see
+        :func:`invert_joint`); all share ``t_step`` and the layer grid.
+    x, y, elevation : (n_soundings,) positions and ground elevations [m].
+    rho_start : None (each sounding starts from its best half-space), or
+        (N,) / (n_soundings, N) resistivities.
+    elevation_constraints : compare each layer with the neighbour's layers
+        it overlaps at the same elevation (weighted by the overlap) instead
+        of the same layer at the same depth.
+    adaptive : SCI adaptive, the tightest constraints that fit. Both factors
+        are raised to the powers 0.25, 0.35, 0.5, 0.7, 1, 1.4, 2, 2.8, 4;
+        each run starts from the previous models and runs to convergence,
+        and the first run with a total RMS <= 1 is kept.
+    maxit : iteration limit of one run.
+    stop_at_half_fit : stop a run once the median RMS reaches 1, before the
+        soundings that already fit are over-fitted (not used when adaptive).
+    Other arguments: as :func:`invert_joint`.
+
+    A sounding above RMS 1 that improves by less than 1 % over 3 iterations
+    is abandoned: its model is frozen and it leaves the system.
+
+    Returns
+    -------
+    dict with 'resistivities' (n_soundings, N), 'rms' (n_soundings,),
+    'rms_history', 'predicted' and 'observed' (lists, one per sounding),
+    'converged' (n_soundings,), 'abandoned' (iteration, 0 = never),
+    'n_iter', 'termination_reason', 'vertical_factor', 'lateral_factor'
+    (the factors of the run kept) and 'runs' (one dict per SCI run).
+    """
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+
+    thicknesses = np.asarray(thicknesses, dtype=float)
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    S, L = len(stations), thicknesses.size + 1
+    z = np.zeros(S) if elevation is None else np.asarray(elevation, dtype=float)
+    M = [np.vstack([f['M'] for f in station]) for station in stations]
+    used = np.any(np.vstack(M) != 0, axis=0)
+    M = [matrix[:, used] for matrix in M]
+    obs = [np.concatenate([np.asarray(f['obs'], dtype=float) for f in station]) for station in stations]
+    w = [o / np.concatenate([np.asarray(f['noise'], dtype=float) for f in station]) for o, station in zip(obs, stations)]
+    step, jacobian_step = _step_functions(thicknesses, np.asarray(t_step, dtype=float)[used], tx_size, geometry, rx_x, rx_y,
+                                          n_quad, use_numba, use_cuda, transform, system_filter, kernel,
+                                          tx_height, rx_height)
+    lower, upper = np.log(float(rho_min)), np.log(float(rho_max))
+    median = lambda values: np.sort(values)[len(values) // 2] if len(values) else 0.0
+
+    def residual(s, g):  # ln(d / g) / sigma, continued linearly below g = d / 1000
+        floor = 1e-3 * obs[s]
+        return w[s] * np.where(g >= floor, np.log(obs[s] / np.maximum(g, floor)), np.log(1e3) + (floor - g) / floor)
+
+    rms = lambda s, g: float(np.sqrt(np.mean(residual(s, g) ** 2)))
+
+    # Constraint rows sum(c_k m_k) = 0 +/- sigma: vertical ones between adjacent layers, lateral ones
+    # between neighbours. ``unit`` is sigma without ln(factor); a and b are the soundings involved.
+    tops = np.concatenate([[0.0], np.cumsum(thicknesses)])
+    own_bottom, other_bottom = np.append(tops[1:], tops[-1] + thicknesses[-1]), np.append(tops[1:], np.inf)
+    rows = [([s * L + j, s * L + j + 1], [-1.0, 1.0], 1.0, False, s, s) for s in range(S) for j in range(L - 1)]
+    for a, b in _neighbour_edges(x, y):
+        unit = (max(1.0, np.hypot(x[a] - x[b], y[a] - y[b])) / reference_distance) ** distance_power
+        if not elevation_constraints:
+            rows += [([a * L + j, b * L + j], [-1.0, 1.0], unit, True, a, b) for j in range(L)]
+            continue
+        for p, q in ((a, b), (b, a)):  # from each side, so the pair stays symmetric
+            shift = z[q] - z[p]
+            overlap = np.clip(np.minimum(own_bottom[:, None] + shift, other_bottom) - np.maximum(tops[:, None] + shift, tops), 0.0, None)
+            for j in np.flatnonzero(overlap.sum(axis=1) > 0):  # none above the neighbour's surface
+                k = np.flatnonzero(overlap[j])
+                rows.append(([p * L + j, *(q * L + k)], [-1.0, *(overlap[j, k] / overlap[j].sum())], unit * np.sqrt(2.0), True, p, q))
+    index = np.repeat(np.arange(len(rows)), [len(r[0]) for r in rows])
+    C = sparse.csr_matrix((np.concatenate([r[1] for r in rows]), (index, np.concatenate([r[0] for r in rows]))), shape=(len(rows), S * L))
+    unit, lateral, row_a, row_b = (np.array([r[k] for r in rows]) for k in (2, 3, 4, 5))
+
+    if rho_start is None:  # each sounding from its best half-space; one step response serves them all
+        values = np.clip(np.log(10.0) * np.arange(33) / 8.0, lower, upper)
+        responses = [step(np.full(L, value)) for value in values]
+        model = np.array([np.full(L, values[np.argmin([rms(s, M[s] @ r) for r in responses])]) for s in range(S)])
+    else:
+        model = np.log(np.broadcast_to(np.asarray(rho_start, dtype=float), (S, L))).copy()
+
+    def run(vertical, lateral_factor_, model, half_fit):
+        sigma = np.where(lateral, np.log(lateral_factor_), np.log(vertical)) * unit
+        active, abandoned = np.ones(S, dtype=bool), np.zeros(S, dtype=int)
+        pred = [M[s] @ step(model[s]) for s in range(S)]
+        history = [[rms(s, pred[s])] for s in range(S)]
+        measure = median([h[-1] for h in history])
+        step_max, previous_level, n_iter, termination = 3.0, 1, 0, 'max_iterations'
+        for _ in range(maxit):
+            if not np.isfinite(measure) or not active.any():
+                termination = 'invalid_response' if active.any() else 'every_sounding_abandoned'
+                break
+            weighted = sparse.diags((active[row_a] & active[row_b]) / sigma) @ C
+            CtC = (weighted.T @ weighted).tocsr()
+            blocks, rhs = [], np.zeros((S, L))
+            for s in range(S):  # Gauss-Newton term and gradient of each sounding
+                if active[s]:
+                    A = (w[s] / np.maximum(pred[s], 1e-3 * obs[s]))[:, None] * (M[s] @ jacobian_step(model[s]))
+                    rhs[s] = A.T @ residual(s, pred[s])
+                blocks.append(A.T @ A if active[s] else np.zeros((L, L)))
+            rhs = np.where(active[:, None], rhs - (CtC @ model.ravel()).reshape(S, L), 0.0).ravel()
+            G = (sparse.block_diag(blocks) + CtC).tocsc()
+            mean_diagonal = G.diagonal().mean()
+            # Marquardt ladder (x3 per level), from three levels below the last accepted one: the first
+            # step within the step limit that lowers the median RMS enough is accepted.
+            for level in range(max(1, previous_level - 3), 41):
+                delta = spsolve(G + 1e-4 * mean_diagonal * 3.0 ** (level - 1) * sparse.identity(S * L, format='csc'), rhs)
+                if not np.all(np.isfinite(delta)) or np.abs(delta).max() > step_max:
+                    continue
+                candidate = np.clip(model + delta.reshape(S, L), lower, upper)
+                candidate_pred = [M[s] @ step(candidate[s]) if active[s] else pred[s] for s in range(S)]
+                for s in np.flatnonzero(active):  # a sounding that overshoots backs off towards its model
+                    limit = np.sqrt(2.0) * history[s][-1]
+                    for _ in range(4):
+                        if rms(s, candidate_pred[s]) <= limit:
+                            break
+                        candidate[s] = 0.5 * (model[s] + candidate[s])
+                        candidate_pred[s] = M[s] @ step(candidate[s])
+                    if not rms(s, candidate_pred[s]) <= limit:
+                        candidate[s], candidate_pred[s] = model[s], pred[s]
+                change = (measure - median([rms(s, candidate_pred[s]) for s in np.flatnonzero(active)])) / measure
+                if np.isfinite(change) and change >= 0.007:
+                    break
+                if step_max > 1.1:
+                    step_max = max(step_max / 1.8, 1.1)
+                elif np.isfinite(change) and change > 0.0:  # improving, but by less than the threshold
+                    termination = 'minimum_step'
+                    break
+            else:
+                termination = 'no_improvement'
+                break
+            n_iter, previous_level, model, pred, step_max = n_iter + 1, level, candidate, candidate_pred, step_max * 1.2
+            for s in range(S):
+                history[s].append(rms(s, pred[s]) if active[s] else history[s][-1])
+            accepted = median([history[s][-1] for s in np.flatnonzero(active)])
+            for s in np.flatnonzero(active):  # abandon a misfitting sounding that stopped improving
+                h = history[s]
+                if h[-1] > 1.005 and len(h) >= 4 and h[-4] - h[-1] < 0.01 * h[-4]:
+                    active[s], abandoned[s] = False, n_iter
+            measure = median([history[s][-1] for s in np.flatnonzero(active)])
+            if verbose:
+                print(f"  iteration {n_iter}: median RMS {accepted:.2f}, {active.sum()} of {S} soundings active")
+            if half_fit and accepted <= 1.0:
+                termination = 'median_rms_below_1'
+            if termination != 'max_iterations':
+                break
+        return model, pred, history, abandoned, n_iter, termination
+
+    runs = []
+    for scale in (0.25, 0.35, 0.5, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0) if adaptive else (1.0,):
+        vertical, lateral_ = vertical_factor ** scale, lateral_factor ** scale
+        if verbose:
+            print(f"SCI: vertical factor {vertical:.3g}, lateral factor {lateral_:.3g}")
+        model, pred, history, abandoned, n_iter, termination = run(vertical, lateral_, model, stop_at_half_fit and not adaptive)
+        final = np.array([h[-1] for h in history])
+        gates = np.array([o.size for o in obs])
+        total = float(np.sqrt(np.sum(final ** 2 * gates) / gates.sum()))
+        runs.append({'vertical_factor': vertical, 'lateral_factor': lateral_, 'total_rms': total,
+                     'median_rms': float(np.median(final)), 'n_iter': n_iter, 'termination_reason': termination})
+        if total <= 1.0:  # total, so that soundings that fit poorly count
+            break
+    return {'resistivities': np.exp(model), 'rms': final, 'rms_history': history, 'predicted': pred, 'observed': obs,
+            'converged': final <= 1.005, 'abandoned': abandoned, 'n_iter': n_iter, 'termination_reason': termination,
+            'vertical_factor': vertical, 'lateral_factor': lateral_, 'runs': runs}

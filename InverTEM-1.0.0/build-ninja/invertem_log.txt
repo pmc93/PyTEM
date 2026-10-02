@@ -1,0 +1,164 @@
+11:18:07.554 [info] InverTEM 1.0.0 starting in "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja"
+11:18:07.555 [info] System: "Windows 11 Version 25H2" "10.0.26200" "x86_64" Qt 6.11.2
+11:18:07.555 [info] AVX2: true
+11:18:07.555 [debug] checking directory path "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/platforms" ...
+11:18:07.556 [debug] looking at "qwindows.dll"
+11:18:07.560 [debug] Found metadata in lib C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/platforms/qwindows.dll, metadata=
+{
+    "IID": "org.qt-project.Qt.QPA.QPlatformIntegrationFactoryInterface.5.3",
+    "MetaData": {
+        "Keys": [
+            "windows"
+        ]
+    },
+    "archlevel": 1,
+    "className": "QWindowsIntegrationPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+11:18:07.561 [debug] Got keys from plugin meta data QList("windows")
+11:18:07.609 [debug] "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/platforms/qwindows.dll" loaded library
+11:18:07.623 [debug] checking directory path "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/platformthemes" ...
+11:18:07.630 [debug] checking directory path "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/styles" ...
+11:18:07.630 [debug] looking at "qmodernwindowsstyle.dll"
+11:18:07.632 [debug] Found metadata in lib C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/styles/qmodernwindowsstyle.dll, metadata=
+{
+    "IID": "org.qt-project.Qt.QStyleFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "windowsvista",
+            "windows11"
+        ]
+    },
+    "archlevel": 1,
+    "className": "QModernWindowsStylePlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+11:18:07.632 [debug] Got keys from plugin meta data QList("windowsvista", "windows11")
+11:18:07.669 [debug] "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/styles/qmodernwindowsstyle.dll" loaded library
+11:18:07.669 [info] QApplication created, platform "windows"
+11:18:07.669 [info] Screen "\\\\.\\DISPLAY1" QRect(0,0 1280x800) scale 1.5
+11:18:07.669 [debug] checking directory path "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/iconengines" ...
+11:18:07.670 [debug] looking at "qsvgicon.dll"
+11:18:07.670 [debug] Found metadata in lib C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/iconengines/qsvgicon.dll, metadata=
+{
+    "IID": "org.qt-project.Qt.QIconEngineFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "svg",
+            "svgz",
+            "svg.gz"
+        ]
+    },
+    "archlevel": 1,
+    "className": "QSvgIconPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+11:18:07.670 [debug] Got keys from plugin meta data QList("svg", "svgz", "svg.gz")
+11:18:07.671 [debug] checking directory path "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/imageformats" ...
+11:18:07.671 [debug] looking at "qgif.dll"
+11:18:07.671 [debug] Found metadata in lib C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/imageformats/qgif.dll, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "gif"
+        ],
+        "MimeTypes": [
+            "image/gif"
+        ]
+    },
+    "archlevel": 1,
+    "className": "QGifPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+11:18:07.671 [debug] Got keys from plugin meta data QList("gif")
+11:18:07.671 [debug] looking at "qico.dll"
+11:18:07.672 [debug] Found metadata in lib C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/imageformats/qico.dll, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "ico",
+            "cur"
+        ],
+        "MimeTypes": [
+            "image/vnd.microsoft.icon",
+            "image/vnd.microsoft.icon"
+        ]
+    },
+    "archlevel": 1,
+    "className": "QICOPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+11:18:07.672 [debug] Got keys from plugin meta data QList("ico", "cur")
+11:18:07.672 [debug] looking at "qjpeg.dll"
+11:18:07.674 [debug] Found metadata in lib C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/imageformats/qjpeg.dll, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "jpg",
+            "jpeg",
+            "jfif"
+        ],
+        "MimeTypes": [
+            "image/jpeg",
+            "image/jpeg",
+            "image/jpeg"
+        ]
+    },
+    "archlevel": 1,
+    "className": "QJpegPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+11:18:07.675 [debug] Got keys from plugin meta data QList("jpg", "jpeg", "jfif")
+11:18:07.675 [debug] looking at "qsvg.dll"
+11:18:07.675 [debug] Found metadata in lib C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/imageformats/qsvg.dll, metadata=
+{
+    "IID": "org.qt-project.Qt.QImageIOHandlerFactoryInterface",
+    "MetaData": {
+        "Keys": [
+            "svg",
+            "svgz"
+        ],
+        "MimeTypes": [
+            "image/svg+xml",
+            "image/svg+xml-compressed"
+        ]
+    },
+    "archlevel": 1,
+    "className": "QSvgPlugin",
+    "debug": false,
+    "version": 396032
+}
+
+
+11:18:07.675 [debug] Got keys from plugin meta data QList("svg", "svgz")
+11:18:07.676 [info] Reading invertem_solver.txt
+11:18:07.683 [info] Building interface
+11:18:10.078 [info] GPU: GPU acceleration needs method = adaptive and transform = dlf in invertem_solver.txt.
+11:18:10.079 [debug] checking directory path "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/networkaccess" ...
+11:18:10.081 [info] Interface built
+11:18:10.227 [info] Main window shown
+11:18:10.227 [debug] checking directory path "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/accessiblebridge" ...
+11:19:22.185 [info] Exited with code 0
+11:19:22.296 [debug] "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/styles/qmodernwindowsstyle.dll" unloaded library 
+11:19:22.296 [debug] "C:/Users/pamcl/OneDrive - Danmarks Tekniske Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/platforms/qwindows.dll" unloaded library 

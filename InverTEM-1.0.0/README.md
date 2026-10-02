@@ -81,6 +81,42 @@ uses an ideal turn-off waveform. WGS84 UTM coordinates declared with
 EPSG:32601–32660 or EPSG:32701–32760 are converted to longitude/latitude for
 background-map alignment.
 
+Aarhus Workbench XYZ data exports (for example tTEM `Proc_AVG_export.xyz`) are
+read too. Each row is one moment; rows with the same DATE and TIME form one
+sounding, named `Line<LINE_NO>_<n>` and shown as `file.xyz#Line1_2`. Dummy
+values mark gates as rejected, `DBDT_STD` is taken as the relative error, and
+dB/dt in V/Am^4 is multiplied by `TX_AREA` to give V/Am². The XYZ carries no
+system description, so InverTEM takes it from a system file beside it: a `.gex`
+of the same name (else the only `.gex` in the folder), or a raw TEMcompany
+`stb2xyz` file of the survey (for example `2026_0826_081707_ChA.xyz`). From the
+TEMcompany file it reads `TxLoop_XYLength`, the Tx/Rx positions and heights
+(`TxLoop_XYZPos`, `RxCoil_XYZPos`), `LPFilter_RxCoil`/`LPFilter_RxInst`, the LM
+and HM waveforms, and the processed gate open/close times shifted by
+`LM_GateTimeShift`/`HM_GateTimeShift` (the Workbench gate centres already are).
+If none is found, InverTEM asks for one; cancelling uses tTEM defaults: 2 × 4 m
+loop, receiver 9 m behind, Tx/Rx 0.5 m above ground, 670 kHz receiver filter,
+LM 200 µs on / 2.5 µs turn-off at 2110 Hz, HM 450 µs on / 4 µs turn-off at
+660 Hz. The log reports which was used.
+
+Raw TEMcompany `stb2xyz` data files (first line `TEMcompany - stb2xyz.exe ...`)
+can be imported directly; their header is the system. Each row is one LM or HM
+stack, and consecutive LM and HM rows form one sounding (`Sounding_<n>`, about
+22,000 in a full tTEM day, unaveraged). dB/dt in V/m² is divided by `TxCurrent`
+and multiplied by `LM_DataFactor`/`HM_DataFactor`; gate centres are
+`*_CenterTime` shifted by `*_GateTimeShift`, `dbdtStd` is the relative error, and
+longitude/latitude are also projected to UTM for the model export.
+
+For XYZ imports (not USF) InverTEM also asks for a line file (`.lin`, lines of
+`date time line lat lon ! Start|End`). Records outside every Start–End interval
+— the turns between lines — are not imported, and the soundings take the line
+numbers of the file. Cancelling imports all data. Workbench exports are usually
+already cut to the lines; for raw TEMcompany data the Vechta line file drops
+about 14,000 of 44,000 records.
+
+The model XYZ export writes UTM coordinates: the data's own UTM coordinates when
+it has them, otherwise longitude/latitude projected into the UTM zone of the
+survey's mean longitude, with the matching EPSG code in the header.
+
 Imported transmitter-loop and receiver-coil dimensions are displayed under
 `Geometry:`. Gates with non-positive stacked voltage or SNR below 3 are
 disabled initially. Right-clicking a point in the data plot toggles that gate.
@@ -370,9 +406,9 @@ chain was cross-checked on `L008_S001_2026_0915_084148.usf`: median relative
 difference from the Kenbec Python matrix path was below 0.00001%, with a
 maximum below 0.09% over the LM gates.
 
-## Fast SCI
+## SCI fast and SCI adaptive
 
-Choosing **SCI** as the regularisation (log data space; a linear-data-space
+Choosing **SCI fast** as the regularisation (log data space; a linear-data-space
 variant exists in the code but is hidden) inverts
 every included sounding at once, after the Lupus scheme (TEMcompany):
 
@@ -381,11 +417,14 @@ every included sounding at once, after the Lupus scheme (TEMcompany):
   or linear data space (d, as Lupus), vertical constraints
   between adjacent layers and spatial constraints between neighbouring
   soundings (Delaunay triangulation of the sounding positions);
-- lateral constraints compare each layer with the neighbour's resistivity at
-  the same elevation (from the soundings' ground elevations, interpolated
-  between the neighbour's layer mid-depths; nothing is constrained above the
-  neighbour's surface). `sci_constraints = depth` compares equal depths below
-  the surface instead; on flat ground both are identical;
+- lateral constraints compare each layer with the neighbour's layers it
+  overlaps at the same elevation (from the soundings' ground elevations),
+  weighted by the overlap; nothing is constrained above the neighbour's
+  surface. `sci_constraints = depth` compares equal depths below the surface
+  instead; on flat ground both are identical. Elevation constraints need
+  heights that agree between passes: when soundings on different passes
+  within 3 m typically differ by more than 1 m (GPS height drift), depth
+  constraints are used and the log says so;
 - a lateral constraint loosens with distance as
   `ln(sci_lateral_factor) * (distance / sci_reference_distance)^sci_distance_power`;
 - each sounding starts from its best-fitting homogeneous half-space, chosen
@@ -411,11 +450,47 @@ every included sounding at once, after the Lupus scheme (TEMcompany):
 - the coupled system is solved by conjugate gradients preconditioned with a
   Cholesky factor per sounding.
 
+**SCI adaptive** chooses the constraint strength by the discrepancy principle:
+the log vertical and lateral factors are scaled 0.25, 0.35, 0.5, 0.7, 1, 1.4,
+2, 2.8 and 4 times (strong to loose), each run starting from the previous
+models and running to convergence (no stop at median RMS 1, which would leave
+poorly fitting lines behind as stripes), and the first run whose total RMS
+over all soundings reaches 1 is kept (else the loosest). The chosen factors
+are in the model name and the log. It takes several SCI fast runs.
+
 `invertem_solver.txt` is read at start-up and again before every batch, so
-edits apply to the next run without restarting. Missing settings (including
-the `sci_*` ones in older files) are appended with their current values.
-Defaults: vertical factor 3.0, lateral factor 1.5 at 100 m, distance power 0.5,
-30 iterations; larger factors mean looser constraints.
+edits apply to the next run without restarting; a removed line returns to its
+default. Missing settings (including the `sci_*` ones in older files) are
+appended with their current values. Defaults: vertical factor 3.0, lateral
+factor 1.5 at 100 m, distance power 0.5, 30 iterations; larger factors mean
+looser constraints. The SCI keys take comma-separated lists
+(`sci_lateral_factor = 1.5, 2.5, 4`): the batch then runs every combination in
+turn and keeps each as its own model ("SCI fast v3 l2.5 100 m p0.5"), selectable
+per sounding and exportable. `invertem_solver_test.txt` is an example that
+cycles through 18 combinations. The log lists the settings of every run when
+the batch starts.
+
+## Ground elevations from a terrain model
+
+GPS heights are coarse (tTEM stores whole metres) and can drift by several
+metres between passes, which misplaces soundings in sections and upsets
+elevation constraints. **Ground elevations from DEM...** replaces them with
+terrain heights (bilinear) from:
+
+- DEM files: GeoTIFF (classic TIFF, strips or tiles, uncompressed, LZW or
+  Deflate, predictors 1-3; the Cloud-Optimized GeoTIFFs of the Lower Saxony
+  DGM1 or the Danish DHM work as downloaded) or an `x y z` text grid. Several
+  tiles can be selected at once. UTM tiles (EPSG 258xx/326xx) are sampled at
+  the soundings' positions in that zone, geographic ones (4326/4258) at their
+  longitude/latitude;
+- Copernicus GLO-90 (90 m cells) from the Open-Meteo elevation API
+  (https://open-meteo.com/en/docs/elevation-api, free for non-commercial use
+  with attribution to Copernicus and Open-Meteo), for positions rounded to
+  about 50 m, 100 per request.
+
+Soundings outside the model keep their heights; the log reports how many
+changed and by how much. The corrected heights are saved with the project and
+used by SCI and the model export.
 
 ## Portable single-file executable
 
@@ -429,12 +504,15 @@ usual. The OpenGL/Direct3D fallback DLLs are left out (InverTEM draws with the
 raster engine). If Enigma Virtual Box is not installed (or `ENIGMA_VB_CONSOLE`
 does not point to `enigmavbconsole.exe`), the step is skipped with a note.
 
-The same step also writes `InverTEM_portable.zip`: the exe with the same runtime
-files in one plain folder. Share this if the single-file exe will not start on
-another PC. Packed exes are often blocked by antivirus or SmartScreen (on the
-first run choose *More info → Run anyway*, or right-click → Properties →
-*Unblock*), and the unzipped folder avoids that. Both need 64-bit Windows 10
-(1809 or later) or Windows 11, which Qt 6 requires.
+If the exe will not start on another PC, antivirus or SmartScreen may be blocking
+it (on the first run choose *More info → Run anyway*, or right-click →
+Properties → *Unblock*). It needs 64-bit Windows 10 (1809 or later) or Windows
+11, which Qt 6 requires.
+
+Every start writes `invertem_log.txt` next to the exe (or in `%TEMP%` if that
+folder is read-only): system and screen details, the Qt plugin loading, each
+start-up step, all Qt warnings and, on a crash, the exception code and the DLL
+it happened in. Ask for this file when InverTEM fails on another PC.
 
 ## Automatic gate selection
 
@@ -464,3 +542,33 @@ fitted moment keeps fewer than three gates.
 - Map: left-click selects a sounding, right-click excludes or re-includes it.
   Excluding does not change its gates; they are shown greyed while excluded
   and cannot be edited until it is included again.
+
+## Processing tools (after EEMstudio)
+
+Ideas taken from the EEM Team's EEMstudio QGIS plugin:
+
+- **Average soundings...** averages XYZ data along each line in windows of time
+  or distance. Every gate averages the soundings within its own width of the
+  window centre; the width is interpolated in log time between three (time,
+  width) points per moment, so late gates average more soundings. The mean is
+  weighted by 1/STD², drops values beyond two standard deviations, and its STD
+  adds the minimum STD in quadrature. The raw soundings stay behind the
+  averaged decay in grey and can be restored from the same dialog until
+  InverTEM is closed.
+- **Noise model...** sets STD = √(base² + (N·(t/1 ms)^-½ / |dB/dt|)²), with the
+  base a uniform STD or the data's own and N a dB/dt noise level [V/m²] per
+  moment, drawn on the decay plot. N starts at the level estimated from the
+  data's own STDs (median over all soundings of the STD beyond the uniform one,
+  scaled to 1 A and 1 ms). The window stays open while browsing, and the
+  original STDs can be reset. The inversion still uses at least the error floor.
+- **Remove STD ≥ N...** removes every used gate with a relative STD of N % or more.
+- **Selections**: Ctrl + right-drag on a decay or transect selects gates. Then
+  Q removes and A restores them, N removes the negative ones, E removes from
+  the first selected gate to the last gate and W from the first gate to the
+  last selected one (Shift+E / Shift+W: for every sounding of the page), 1, 2
+  and 5 add 10, 20 and 50 % to their STD, 0 restores it, Esc clears.
+- The data can be shown as late-time apparent resistivity (drop-down under "Data view").
+- B bookmarks the current sounding (black on the map, ★ in the list) and Ctrl+B
+  goes to the next bookmark.
+- Sounding groups: the "Show" drop-down under the Group box shows and steps through
+  one group only (data, models and transect); "Colour: Group" shows the groups on the map.

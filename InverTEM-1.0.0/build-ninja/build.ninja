@@ -116,6 +116,17 @@ build CMakeFiles\InverTEM.dir\src\CudaForward.cu.obj: CUDA_COMPILER__InverTEM_un
   TARGET_PDB = InverTEM.pdb
   TARGET_SUPPORT_DIR = CMakeFiles\InverTEM.dir
 
+build CMakeFiles\InverTEM.dir\src\ElevationModel.cpp.obj: CXX_COMPILER__InverTEM_unscanned_Release C$:\Users\pamcl\OneDrive$ -$ Danmarks$ Tekniske$ Universitet\Dokumenter\Projects\Python\pyTEM\InverTEM-1.0.0\src\ElevationModel.cpp || cmake_object_order_depends_target_InverTEM
+  CONFIG = Release
+  DEFINES = -DINVERTEM_APP_VERSION=\"1.0.0\" -DINVERTEM_USE_OPENMP=1 -DINVERTEM_VECTOR_KERNEL=1 -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DUNICODE -DWIN32 -DWIN64 -D_ENABLE_EXTENDED_ALIGNED_STORAGE -D_UNICODE -D_WIN64
+  FLAGS = /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /Zc:__cplusplus /permissive- -Zc:__cplusplus -permissive- -utf-8 -openmp
+  INCLUDES = -I"C:\Users\pamcl\OneDrive - Danmarks Tekniske Universitet\Dokumenter\Projects\Python\pyTEM\InverTEM-1.0.0\build-ninja\InverTEM_autogen\include" -external:IC:\Qt\6.11.2\msvc2022_64\include\QtWidgets -external:IC:\Qt\6.11.2\msvc2022_64\include -external:IC:\Qt\6.11.2\msvc2022_64\include\QtCore -external:IC:\Qt\6.11.2\msvc2022_64\mkspecs\win32-msvc -external:IC:\Qt\6.11.2\msvc2022_64\include\QtGui -external:IC:\Qt\6.11.2\msvc2022_64\include\QtNetwork -external:W0
+  OBJECT_DIR = CMakeFiles\InverTEM.dir
+  OBJECT_FILE_DIR = CMakeFiles\InverTEM.dir\src
+  TARGET_COMPILE_PDB = CMakeFiles\InverTEM.dir\
+  TARGET_PDB = InverTEM.pdb
+  TARGET_SUPPORT_DIR = CMakeFiles\InverTEM.dir
+
 build CMakeFiles\InverTEM.dir\src\MapTileLoader.cpp.obj: CXX_COMPILER__InverTEM_unscanned_Release C$:\Users\pamcl\OneDrive$ -$ Danmarks$ Tekniske$ Universitet\Dokumenter\Projects\Python\pyTEM\InverTEM-1.0.0\src\MapTileLoader.cpp || cmake_object_order_depends_target_InverTEM
   CONFIG = Release
   DEFINES = -DINVERTEM_APP_VERSION=\"1.0.0\" -DINVERTEM_USE_OPENMP=1 -DINVERTEM_VECTOR_KERNEL=1 -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DUNICODE -DWIN32 -DWIN64 -D_ENABLE_EXTENDED_ALIGNED_STORAGE -D_UNICODE -D_WIN64
@@ -128,6 +139,17 @@ build CMakeFiles\InverTEM.dir\src\MapTileLoader.cpp.obj: CXX_COMPILER__InverTEM_
   TARGET_SUPPORT_DIR = CMakeFiles\InverTEM.dir
 
 build CMakeFiles\InverTEM.dir\src\MatrixConvolution.cpp.obj: CXX_COMPILER__InverTEM_unscanned_Release C$:\Users\pamcl\OneDrive$ -$ Danmarks$ Tekniske$ Universitet\Dokumenter\Projects\Python\pyTEM\InverTEM-1.0.0\src\MatrixConvolution.cpp || cmake_object_order_depends_target_InverTEM
+  CONFIG = Release
+  DEFINES = -DINVERTEM_APP_VERSION=\"1.0.0\" -DINVERTEM_USE_OPENMP=1 -DINVERTEM_VECTOR_KERNEL=1 -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DUNICODE -DWIN32 -DWIN64 -D_ENABLE_EXTENDED_ALIGNED_STORAGE -D_UNICODE -D_WIN64
+  FLAGS = /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /Zc:__cplusplus /permissive- -Zc:__cplusplus -permissive- -utf-8 -openmp
+  INCLUDES = -I"C:\Users\pamcl\OneDrive - Danmarks Tekniske Universitet\Dokumenter\Projects\Python\pyTEM\InverTEM-1.0.0\build-ninja\InverTEM_autogen\include" -external:IC:\Qt\6.11.2\msvc2022_64\include\QtWidgets -external:IC:\Qt\6.11.2\msvc2022_64\include -external:IC:\Qt\6.11.2\msvc2022_64\include\QtCore -external:IC:\Qt\6.11.2\msvc2022_64\mkspecs\win32-msvc -external:IC:\Qt\6.11.2\msvc2022_64\include\QtGui -external:IC:\Qt\6.11.2\msvc2022_64\include\QtNetwork -external:W0
+  OBJECT_DIR = CMakeFiles\InverTEM.dir
+  OBJECT_FILE_DIR = CMakeFiles\InverTEM.dir\src
+  TARGET_COMPILE_PDB = CMakeFiles\InverTEM.dir\
+  TARGET_PDB = InverTEM.pdb
+  TARGET_SUPPORT_DIR = CMakeFiles\InverTEM.dir
+
+build CMakeFiles\InverTEM.dir\src\Processing.cpp.obj: CXX_COMPILER__InverTEM_unscanned_Release C$:\Users\pamcl\OneDrive$ -$ Danmarks$ Tekniske$ Universitet\Dokumenter\Projects\Python\pyTEM\InverTEM-1.0.0\src\Processing.cpp || cmake_object_order_depends_target_InverTEM
   CONFIG = Release
   DEFINES = -DINVERTEM_APP_VERSION=\"1.0.0\" -DINVERTEM_USE_OPENMP=1 -DINVERTEM_VECTOR_KERNEL=1 -DQT_CORE_LIB -DQT_GUI_LIB -DQT_NETWORK_LIB -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DUNICODE -DWIN32 -DWIN64 -D_ENABLE_EXTENDED_ALIGNED_STORAGE -D_UNICODE -D_WIN64
   FLAGS = /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -std:c++17 -MD /W4 /Zc:__cplusplus /permissive- -Zc:__cplusplus -permissive- -utf-8 -openmp
@@ -190,7 +212,7 @@ build CMakeFiles\InverTEM.dir\src\VectorKernel.cpp.obj: CXX_COMPILER__InverTEM_u
 #############################################
 # Link the executable CMakeFiles\InverTEM.dir\cmake_device_link.obj
 
-build CMakeFiles\InverTEM.dir\cmake_device_link.obj: CXX_EXECUTABLE_DEVICE_LINKER__InverTEM_Release CMakeFiles\InverTEM.dir\InverTEM_autogen\mocs_compilation.cpp.obj CMakeFiles\InverTEM.dir\src\main.cpp.obj CMakeFiles\InverTEM.dir\src\MainWindow.cpp.obj CMakeFiles\InverTEM.dir\src\InversionWorker.cpp.obj CMakeFiles\InverTEM.dir\src\JacobianCache.cpp.obj CMakeFiles\InverTEM.dir\src\CudaForward.cu.obj CMakeFiles\InverTEM.dir\src\MapTileLoader.cpp.obj CMakeFiles\InverTEM.dir\src\MatrixConvolution.cpp.obj CMakeFiles\InverTEM.dir\src\PlotWidget.cpp.obj CMakeFiles\InverTEM.dir\src\TemSolver.cpp.obj CMakeFiles\InverTEM.dir\src\UsfReader.cpp.obj CMakeFiles\InverTEM.dir\src\VectorKernel.cpp.obj | C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Widgets.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.lib || InverTEM_autogen InverTEM_autogen_timestamp_deps
+build CMakeFiles\InverTEM.dir\cmake_device_link.obj: CXX_EXECUTABLE_DEVICE_LINKER__InverTEM_Release CMakeFiles\InverTEM.dir\InverTEM_autogen\mocs_compilation.cpp.obj CMakeFiles\InverTEM.dir\src\main.cpp.obj CMakeFiles\InverTEM.dir\src\MainWindow.cpp.obj CMakeFiles\InverTEM.dir\src\InversionWorker.cpp.obj CMakeFiles\InverTEM.dir\src\JacobianCache.cpp.obj CMakeFiles\InverTEM.dir\src\CudaForward.cu.obj CMakeFiles\InverTEM.dir\src\ElevationModel.cpp.obj CMakeFiles\InverTEM.dir\src\MapTileLoader.cpp.obj CMakeFiles\InverTEM.dir\src\MatrixConvolution.cpp.obj CMakeFiles\InverTEM.dir\src\Processing.cpp.obj CMakeFiles\InverTEM.dir\src\PlotWidget.cpp.obj CMakeFiles\InverTEM.dir\src\TemSolver.cpp.obj CMakeFiles\InverTEM.dir\src\UsfReader.cpp.obj CMakeFiles\InverTEM.dir\src\VectorKernel.cpp.obj | C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Widgets.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.lib || InverTEM_autogen InverTEM_autogen_timestamp_deps
   LANGUAGE_COMPILE_FLAGS = -D_WINDOWS -Xcompiler=" /EHsc" -Xcompiler="-O2 -Ob2" -DNDEBUG "--generate-code=arch=compute_75,code=[compute_75,sm_75]" -Xcompiler=-MD
   LINK_LIBRARIES = d3d11.lib dxgi.lib dxguid.lib d3d12.lib mpr.lib userenv.lib ws2_32.lib cudadevrt.lib cudart.lib kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib
   LINK_PATH = -LIBPATH:C:\PROGRA~1\NVIDIA~2\CUDA\v13.2\lib\x64
@@ -208,7 +230,7 @@ build CMakeFiles\InverTEM.dir\cmake_device_link.obj: CXX_EXECUTABLE_DEVICE_LINKE
 #############################################
 # Link the executable InverTEM.exe
 
-build InverTEM.exe: CXX_EXECUTABLE_LINKER__InverTEM_Release CMakeFiles\InverTEM.dir\InverTEM_autogen\mocs_compilation.cpp.obj CMakeFiles\InverTEM.dir\src\main.cpp.obj CMakeFiles\InverTEM.dir\src\MainWindow.cpp.obj CMakeFiles\InverTEM.dir\src\InversionWorker.cpp.obj CMakeFiles\InverTEM.dir\src\JacobianCache.cpp.obj CMakeFiles\InverTEM.dir\src\CudaForward.cu.obj CMakeFiles\InverTEM.dir\src\MapTileLoader.cpp.obj CMakeFiles\InverTEM.dir\src\MatrixConvolution.cpp.obj CMakeFiles\InverTEM.dir\src\PlotWidget.cpp.obj CMakeFiles\InverTEM.dir\src\TemSolver.cpp.obj CMakeFiles\InverTEM.dir\src\UsfReader.cpp.obj CMakeFiles\InverTEM.dir\src\VectorKernel.cpp.obj CMakeFiles\InverTEM.dir\cmake_device_link.obj | C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Widgets.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.lib || InverTEM_autogen InverTEM_autogen_timestamp_deps
+build InverTEM.exe: CXX_EXECUTABLE_LINKER__InverTEM_Release CMakeFiles\InverTEM.dir\InverTEM_autogen\mocs_compilation.cpp.obj CMakeFiles\InverTEM.dir\src\main.cpp.obj CMakeFiles\InverTEM.dir\src\MainWindow.cpp.obj CMakeFiles\InverTEM.dir\src\InversionWorker.cpp.obj CMakeFiles\InverTEM.dir\src\JacobianCache.cpp.obj CMakeFiles\InverTEM.dir\src\CudaForward.cu.obj CMakeFiles\InverTEM.dir\src\ElevationModel.cpp.obj CMakeFiles\InverTEM.dir\src\MapTileLoader.cpp.obj CMakeFiles\InverTEM.dir\src\MatrixConvolution.cpp.obj CMakeFiles\InverTEM.dir\src\Processing.cpp.obj CMakeFiles\InverTEM.dir\src\PlotWidget.cpp.obj CMakeFiles\InverTEM.dir\src\TemSolver.cpp.obj CMakeFiles\InverTEM.dir\src\UsfReader.cpp.obj CMakeFiles\InverTEM.dir\src\VectorKernel.cpp.obj CMakeFiles\InverTEM.dir\cmake_device_link.obj | C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Widgets.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Network.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Gui.lib C$:\Qt\6.11.2\msvc2022_64\lib\Qt6Core.lib || InverTEM_autogen InverTEM_autogen_timestamp_deps
   CONFIG = Release
   FLAGS = /DWIN32 /D_WINDOWS /EHsc /O2 /Ob2 /DNDEBUG -MD
   LINK_FLAGS = /machine:x64 /INCREMENTAL:NO /subsystem:console

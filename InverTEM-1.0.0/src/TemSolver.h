@@ -75,9 +75,16 @@ struct SciSettings {
     double stepMax = 3.0, stepGrowth = 1.2, stepShrink = 1.8, stepMin = 1.1;
     double relativeChangeThreshold = 0.007;
     bool logDataSpace = false; // misfit in ln(data) instead of data
-    // Lateral constraints compare layers at the same elevation (using each
+    // Lateral constraints compare each layer with the neighbour's layers it
+    // overlaps at the same elevation (weighted by the overlap, using each
     // sounding's ground elevation) instead of the same depth below the surface.
     bool elevationConstraints = true;
+    // SCI adaptive: the constraint strength is chosen by the discrepancy
+    // principle (see TemSolver::invertSci).
+    bool adaptive = false;
+    // Stop once the median RMS reaches 1 (half the soundings fit), before the
+    // rest over-fit. SCI adaptive runs to convergence instead.
+    bool stopAtHalfFit = true;
 };
 
 struct InversionOptions {
@@ -116,6 +123,8 @@ struct InversionOptions {
     // invertJoint: AVX2 wavenumber-vectorised recursion (used only when
     // pytem::vectorKernelAvailable(); the GUI always requests it).
     bool vectorizedKernel = false;
+    // invertJoint / invertSci start: best homogeneous half-space instead of the given model.
+    bool halfSpaceStart = false;
     // Invert the whole batch together with TemSolver::invertSci.
     bool spatialConstraints = false;
     SciSettings sci;
@@ -148,6 +157,7 @@ struct InversionResult {
     double doiConservative = -1.0;
     bool doiStandardCapped = false;
     bool doiConservativeCapped = false;
+    SciSettings sci; // invertSci: the settings this result was inverted with
 };
 
 using ProgressCallback = std::function<void(int, double, const std::string &)>;
@@ -198,6 +208,11 @@ public:
 
     // Fast SCI over every sounding at once (see SciSettings); soundings share
     // the layer grid. Positions are planar coordinates and ground elevations in metres.
+    // Starts from the best half-space when halfSpaceStart is set, otherwise from
+    // the given models. With sci.adaptive, the smoothest constraints that fit the
+    // data: the log factors are scaled from 1/4 to 4 times, each run starting from
+    // the previous models and running to convergence, and the first run whose
+    // total RMS over all soundings is <= 1 is kept.
     static std::vector<InversionResult> invertSci(
         const std::vector<InversionOptions> &soundings,
         const std::vector<double> &eastings, const std::vector<double> &northings,

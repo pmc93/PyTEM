@@ -75,10 +75,14 @@ add_executable(InverTEM
     src/JacobianCache.h
     src/CudaForward.h
     ${PYTEM_GPU_SOURCE}
+    src/ElevationModel.cpp
+    src/ElevationModel.h
     src/MapTileLoader.cpp
     src/MapTileLoader.h
     src/MatrixConvolution.cpp
     src/MatrixConvolution.h
+    src/Processing.cpp
+    src/MainWindowHelpers.h
     src/PlotWidget.cpp
     src/PlotWidget.h
     src/TemSolver.cpp

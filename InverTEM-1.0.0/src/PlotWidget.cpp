@@ -36,7 +36,7 @@ QColor interpolateColor(const QColor &first, const QColor &second,
 
 PlotWidget::PlotWidget(QWidget *parent) : QWidget(parent)
 {
-    setMinimumSize(200, 180);
+    setMinimumSize(200, 120);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 }
 
@@ -85,6 +85,18 @@ void PlotWidget::setEqualAspect(bool enabled, double xScale)
 void PlotWidget::setGeographicScaleBar(bool enabled)
 {
     m_geographicScaleBar = enabled;
+    update();
+}
+
+void PlotWidget::setLegendCorner(Qt::Corner corner)
+{
+    m_legendCorner = corner;
+    update();
+}
+
+void PlotWidget::setLegendToggle(bool enabled)
+{
+    m_legendToggle = enabled;
     update();
 }
 
@@ -530,8 +542,11 @@ void PlotWidget::paintEvent(QPaintEvent *)
         gradient.setColorAt(1.0, colorScaleColor(
             m_colorScaleMinimum, m_colorScaleMinimum, m_colorScaleMaximum));
         painter.save();
-        const QRectF scaleBox(barX - 52.0, barY - 25.0,
-                              barWidth + 59.0, barHeight + 32.0);
+        // As wide as the title needs ("Elevation (m)"), right-aligned.
+        const double boxWidth = std::max(barWidth + 59.0,
+            QFontMetrics(painter.font()).horizontalAdvance(m_colorScaleTitle) + 10.0);
+        const QRectF scaleBox(barX + barWidth + 7.0 - boxWidth, barY - 25.0,
+                              boxWidth, barHeight + 32.0);
         painter.setPen(QColor(145, 150, 155));
         painter.setBrush(QColor(255, 255, 255));
         painter.drawRect(scaleBox);
@@ -539,7 +554,7 @@ void PlotWidget::paintEvent(QPaintEvent *)
         painter.setBrush(gradient);
         painter.drawRect(QRectF(barX, barY, barWidth, barHeight));
         painter.setBrush(Qt::NoBrush);
-        painter.drawText(QRectF(barX - 24.0, barY - 20.0, 50.0, 18.0),
+        painter.drawText(QRectF(scaleBox.left(), barY - 20.0, boxWidth, 18.0),
                          Qt::AlignCenter, m_colorScaleTitle);
         painter.setBrush(Qt::NoBrush);
         for (int tick = 0; tick <= 5; ++tick) {
@@ -580,19 +595,34 @@ void PlotWidget::paintEvent(QPaintEvent *)
             widestLegendText, legendMetrics.horizontalAdvance(curve.name));
     }
     const int legendContentWidth = std::max(125, 28 + widestLegendText);
-    int legendX = static_cast<int>(area.right()) - legendContentWidth - 10;
-    int legendY = static_cast<int>(area.top()) + 10;
-    if (m_legendBackground && namedCurveCount > 0) {
-        const QRectF legendBox(legendX - 8, legendY - 6,
-                               legendContentWidth + 16,
-                               namedCurveCount * 18 + 12);
+    const bool left = m_legendCorner == Qt::TopLeftCorner || m_legendCorner == Qt::BottomLeftCorner;
+    const bool bottom = m_legendCorner == Qt::BottomLeftCorner || m_legendCorner == Qt::BottomRightCorner;
+    const bool hidden = m_legendToggle && m_legendHidden;
+    const int boxWidth = hidden ? legendMetrics.horizontalAdvance("Legend") + 16 : legendContentWidth + 16;
+    const int boxHeight = hidden ? 20 : namedCurveCount * 18 + 12;
+    m_legendRect = QRectF(left ? area.left() + 2 : area.right() - boxWidth - 2,
+                          bottom ? area.bottom() - boxHeight - 2 : area.top() + 4, boxWidth, boxHeight)
+                       .translated(m_legendOffset);
+    const QPointF unclamped = m_legendRect.topLeft();
+    m_legendRect.moveTo(std::clamp(m_legendRect.left(), 0.0, std::max(0.0, width() - m_legendRect.width())),
+                        std::clamp(m_legendRect.top(), 0.0, std::max(0.0, height() - m_legendRect.height())));
+    m_legendOffset += m_legendRect.topLeft() - unclamped; // kept inside the widget
+    if (namedCurveCount == 0)
+        m_legendRect = QRectF();
+    if (namedCurveCount > 0 && (m_legendBackground || hidden)) {
         painter.setPen(QColor(165, 170, 175));
         painter.setBrush(QColor(255, 255, 255));
-        painter.drawRect(legendBox);
+        painter.drawRect(m_legendRect);
         painter.setBrush(Qt::NoBrush);
     }
+    if (namedCurveCount > 0 && hidden) {
+        painter.setPen(QColor(45, 52, 60));
+        painter.drawText(m_legendRect, Qt::AlignCenter, "Legend");
+    }
+    int legendX = static_cast<int>(m_legendRect.left()) + 8;
+    int legendY = static_cast<int>(m_legendRect.top()) + 6;
     for (const auto &curve : m_curves) {
-        if (curve.name.isEmpty())
+        if (curve.name.isEmpty() || hidden)
             continue;
         painter.setPen(QPen(curve.color, 2.0,
                             curve.dashed ? Qt::DashLine : Qt::SolidLine));
@@ -622,16 +652,24 @@ void PlotWidget::paintEvent(QPaintEvent *)
 
 void PlotWidget::mousePressEvent(QMouseEvent *event)
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    const QPointF position = event->position();
+#else
+    const QPointF position = event->localPos();
+#endif
+    if (event->button() == Qt::LeftButton && m_legendRect.contains(position)) {
+        m_legendDragging = true;
+        m_legendMoved = false;
+        m_legendPress = position;
+        m_legendPressOffset = m_legendOffset;
+        return;
+    }
     if ((event->button() != Qt::LeftButton && event->button() != Qt::RightButton)
         || m_hitPoints.isEmpty()) {
         QWidget::mousePressEvent(event);
         return;
     }
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    const QPointF click = event->position();
-#else
-    const QPointF click = event->localPos();
-#endif
+    const QPointF &click = position;
     if (event->button() == Qt::RightButton) {
         m_rightDragging = true;
         m_dragStart = click;
@@ -660,6 +698,19 @@ void PlotWidget::mousePressEvent(QMouseEvent *event)
 
 void PlotWidget::mouseMoveEvent(QMouseEvent *event)
 {
+    if (m_legendDragging) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+        const QPointF shift = event->position() - m_legendPress;
+#else
+        const QPointF shift = event->localPos() - m_legendPress;
+#endif
+        m_legendMoved = m_legendMoved || shift.manhattanLength() > 3.0;
+        if (m_legendMoved) {
+            m_legendOffset = m_legendPressOffset + shift;
+            update();
+        }
+        return;
+    }
     if (!m_rightDragging) {
         QWidget::mouseMoveEvent(event);
         return;
@@ -675,6 +726,14 @@ void PlotWidget::mouseMoveEvent(QMouseEvent *event)
 
 void PlotWidget::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (m_legendDragging && event->button() == Qt::LeftButton) {
+        m_legendDragging = false;
+        if (!m_legendMoved && m_legendToggle) { // a click, not a drag
+            m_legendHidden = !m_legendHidden;
+            update();
+        }
+        return;
+    }
     if (!m_rightDragging || event->button() != Qt::RightButton) {
         QWidget::mouseReleaseEvent(event);
         return;
@@ -688,7 +747,13 @@ void PlotWidget::mouseReleaseEvent(QMouseEvent *event)
     const QRectF selection(m_dragStart, m_dragCurrent);
     const QRectF normalized = selection.normalized();
     constexpr double dragThreshold = 5.0;
-    if (normalized.width() < dragThreshold
+    if (event->modifiers().testFlag(Qt::ControlModifier)) { // Ctrl: select, without editing
+        QVector<int> selected;
+        for (const auto &hit : m_hitPoints)
+            if (normalized.adjusted(-6, -6, 6, 6).contains(hit.position) && !selected.contains(hit.pointId))
+                selected.push_back(hit.pointId);
+        emit pointsSelected(selected);
+    } else if (normalized.width() < dragThreshold
         && normalized.height() < dragThreshold) {
         double bestDistanceSquared = 100.0;
         int bestId = -1;

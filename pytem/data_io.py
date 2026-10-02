@@ -9,6 +9,8 @@ produced the file:
 
   * TEM Data Manager (TEM2Go / tTEM) exports -> ``read_tem_xyz()``  -> TEMData
   * TEMImage-Beta station-stacked exports     -> ``read_kenbec_xyz()`` -> KenbecTEMData
+  * Aarhus Workbench processed exports + .gex -> ``read_workbench_xyz()`` -> TunoeTEMData
+  * raw TEMcompany stb2xyz files + .lin       -> ``read_temcompany_xyz()`` -> TunoeTEMData (one row per sounding)
 
 ``read_xyz(path)`` auto-detects the format from the file header and
 dispatches to the right reader.
@@ -51,7 +53,7 @@ class _PositionMixin:
         Stations without a ``Line`` column are treated as a single line.
         """
         if "Line" in self.data.columns:
-            return sorted(self.data["Line"].astype(str).str.strip().unique())
+            return sorted(self.data["Line"].astype(str).str.strip().unique(), key=lambda line: (len(line), line))  # 2 before 10
         return ["1"]
 
     def line_mask(self, line) -> np.ndarray:
@@ -939,3 +941,173 @@ def read_usf(folder: str, max_soundings: int | None = None) -> TunoeTEMData:
     tem.gate_times = gate_times
     tem.waveforms = waveforms
     return tem
+
+
+def read_workbench_xyz(path: str, gex: str) -> TunoeTEMData:
+    """
+    Read an Aarhus Workbench processed tTEM export (`.xyz`) with its system file (`.gex`).
+
+    Every row of the export is one moment (channel); rows sharing a date and
+    time form one sounding, named ``Line<line>_<n>``. dB/dt [V/(A*m^4)] is
+    multiplied by ``TX_AREA`` to V/(A*m^2), ``DBDT_STD`` is the relative
+    error and dummy values become NaN. The `.gex` gives the waveforms, the
+    gate open/close times (plus ``GateTimeShift``; the centre times of the
+    export already include it), the loop, the coil position, the Tx/Rx
+    heights and the low-pass filters (``meta["LowPass"]``, in Hz).
+
+    Returns a :class:`TunoeTEMData`, so ``to_pytem`` and
+    :class:`~pytem.survey.Survey` apply unchanged; ``E``/``N`` hold the
+    export's own coordinates.
+    """
+    numbers = lambda text: np.array(re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text), dtype=float)
+    waveforms, gates, shift, channel_moment, loop, low_pass, meta = {}, {}, {}, {}, [], [], {"LoopTurns": 1}
+    section = ""
+    for raw in open(gex, encoding="utf-8", errors="replace"):
+        line = raw.strip()
+        if line.startswith("["):
+            section = line.strip("[]")
+        if "=" not in line or line.startswith("/"):
+            continue
+        key, text = (part.strip() for part in line.split("=", 1))
+        values = numbers(text)
+        if key.startswith("TxLoopPoint"):
+            loop.append(values[:2])
+        elif key == "RxCoilPosition1":   # z is down, so heights are -z
+            meta.update(RXcoil_X_Position=float(values[0]), RXcoil_Y_Position=float(values[1]), RxHeight=float(-values[2]))
+        elif key == "TxCoilPosition1":
+            meta["TxHeight"] = float(-values[2])
+        elif key.startswith(("WaveformLMPoint", "WaveformHMPoint")):
+            waveforms.setdefault(key[8:10], []).append(values[:2])
+        elif key.startswith(("GateTimeLM", "GateTimeHM")):
+            gates.setdefault(key[8:10], []).append(values[1:3])
+        elif key == "TransmitterMoment":
+            channel_moment[int(section[7:])] = text
+        elif key == "GateTimeShift":
+            shift[channel_moment[int(section[7:])]] = values[0]
+        elif "LowPassFilter" in key or "LPFilter" in key:
+            low_pass.append(float(values.max()))
+    loop = np.array(loop)
+    meta.update(LoopX=float(np.ptp(loop[:, 0])), LoopY=float(np.ptp(loop[:, 1])), LowPass=tuple(dict.fromkeys(low_pass)))
+
+    dummy, centres, columns, previous = 9999.0, {}, None, ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            if not raw.startswith("/"):
+                break
+            body = raw[1:].strip()
+            if previous == "DUMMY":
+                dummy = float(body)
+            elif "epsg:" in body:
+                meta["utm_epsg"] = int(re.search(r"epsg:(\d+)", body).group(1))
+            elif body.startswith("Gates for channel"):
+                centres[channel_moment[int(body.split()[3])]] = numbers(body.split(":", 1)[1])
+            elif body.startswith("DATE"):
+                columns = [name.strip() for name in body.split(",")]
+            previous = body
+    table = pd.read_csv(path, comment="/", header=None, names=columns, skipinitialspace=True).replace(dummy, np.nan)
+    table.index = table["DATE"].astype(str) + " " + table["TIME"].astype(str)
+    first = table[~table.index.duplicated()]
+    line_no = first["LINE_NO"].astype(int)
+    parts = [pd.DataFrame({"SoundingName": "Line" + line_no.astype(str) + "_" + (line_no.groupby(line_no).cumcount() + 1).astype(str),
+                           "Line": line_no.astype(str), "Date": first["DATE"], "Time": first["TIME"],
+                           "E": first["X"], "N": first["Y"], "Elevation": first["ELEVATION"]})]
+    tem = TunoeTEMData(meta=meta)
+    for channel, m in channel_moment.items():
+        rows = table[table["CHANNEL_NO"] == channel]
+        n = centres[m].size
+        edges = np.array(gates[m])[:n] + shift.get(m, 0.0)
+        tem.gate_times[m] = {"center": centres[m], "open": edges[:, 0], "close": edges[:, 1]}
+        tem.waveforms[m] = dict(zip(("time", "amplitude"), np.array(waveforms[m]).T))
+        data = rows[[f"DBDT_Ch{channel}GT{g}" for g in range(1, n + 1)]].to_numpy() * rows[["TX_AREA"]].to_numpy()
+        std = rows[[f"DBDT_STD_Ch{channel}GT{g}" for g in range(1, n + 1)]].to_numpy()
+        parts.append(pd.DataFrame(np.c_[data, std, rows["CURRENT"]], index=rows.index,
+                                  columns=[f"{m}gate{g:03d}" for g in range(1, n + 1)]
+                                  + [f"{m}std{g:03d}" for g in range(1, n + 1)] + [f"{m}current"]))
+    tem.data = pd.concat(parts, axis=1).reset_index(drop=True)
+    return tem
+
+
+def read_temcompany_xyz(path: str, lin: str | None = None) -> TunoeTEMData:
+    """
+    Read a raw TEMcompany stb2xyz file (`.xyz`), one row per sounding.
+
+    The file holds one record per recorded LM or HM stack, with the system
+    in its header (see :func:`read_tem_xyz`). Consecutive LM and HM records
+    form one sounding; a moment a sounding lacks is NaN. dB/dt [V/m^2] is
+    divided by the current and multiplied by the moment's ``DataFactor``,
+    giving V/(A*m^2); ``dbdtStd`` is the relative error and the gate times
+    are shifted by the moment's ``GateTimeShift``.
+
+    ``lin`` is a line file ("date time line lat lon ! Start|End" pairs):
+    records outside every Start-End interval (turns) are dropped and the
+    soundings are named ``Line<line>_<n>``. Without it all records are kept
+    as ``Sounding_<n>``.
+
+    Returns a :class:`TunoeTEMData`, as :func:`read_workbench_xyz`.
+    """
+    raw = read_tem_xyz(path)
+    records = raw.data
+    seconds = lambda date, time, fmt: pd.to_datetime(date + " " + time, format=fmt).astype("int64").to_numpy() / 1e9
+    stamp = seconds(records["Date"].astype(str), records["Time"].astype(str), "%Y%m%d %H:%M:%S.%f")
+    line = np.zeros(len(records), dtype=int)
+    if lin:
+        marks = pd.read_csv(lin, sep=r"\s+", header=None, usecols=[0, 1, 2, 6], names=["date", "time", "line", "mark"], dtype=str)
+        marks["stamp"] = seconds(marks["date"], marks["time"], "%d-%m-%Y %H:%M:%S")
+        start, end = (marks[marks["mark"] == mark].sort_values("stamp") for mark in ("Start", "End"))
+        k = np.searchsorted(start["stamp"].to_numpy(), stamp, side="right") - 1   # the line started last
+        inside = (k >= 0) & (stamp <= end["stamp"].to_numpy()[np.clip(k, 0, None)])
+        line = np.where(inside, start["line"].astype(int).to_numpy()[np.clip(k, 0, None)], -1)
+    records, line = records[line >= 0].reset_index(drop=True), line[line >= 0]
+
+    # A record joins the previous sounding when that has one record of the other moment, on the same line.
+    moment = records["Moment"].to_numpy()
+    sounding, joined = np.zeros(len(records), dtype=int), False
+    for i in range(1, len(records)):
+        joined = not joined and line[i] == line[i - 1] and moment[i] != moment[i - 1]
+        sounding[i] = sounding[i - 1] + (not joined)
+    first = records.groupby(sounding).first()
+    number = first.groupby(line[np.unique(sounding, return_index=True)[1]]).cumcount() + 1
+    line_no = pd.Series(line).groupby(sounding).first()
+    parts = [pd.DataFrame({"SoundingName": np.where(line_no > 0, "Line" + line_no.astype(str) + "_", "Sounding_") + number.astype(str),
+                           "Line": line_no.astype(str), "Date": first["Date"], "Time": first["Time"], "Longitude": first["Longitude"],
+                           "Latitude": first["Latitude"], "Elevation": first["Elevation"]})]
+
+    numbers = lambda key: _floats(raw.meta[key])
+    rx, tx, loop = numbers("RxCoil_XYZPos"), numbers("TxLoop_XYZPos"), numbers("TxLoop_XYLength")
+    tem = TunoeTEMData(meta={"LoopTurns": int(numbers("TxLoop_NTurns")[0]), "LoopX": loop[0], "LoopY": loop[1],
+                             "RXcoil_X_Position": rx[0] - tx[0], "RXcoil_Y_Position": rx[1] - tx[1], "TxHeight": tx[2], "RxHeight": rx[2],
+                             "LowPass": tuple(numbers(key)[0] for key in ("LPFilter_RxCoil", "LPFilter_RxInst") if key in raw.meta)},
+                       waveforms=raw.waveforms)
+    for value, m in enumerate(("LM", "HM")):
+        tem.gate_times[m] = {key: times + numbers(f"{m}_GateTimeShift")[0] for key, times in raw.gate_times[m].items()}
+        rows = records[moment == value].set_index(sounding[moment == value])
+        gates = range(1, len(raw.gate_times[m]["center"]) + 1)
+        data = rows[[f"dbdtDat{g:03d}" for g in gates]].to_numpy() / rows[["TxCurrent"]].to_numpy() * numbers(f"{m}_DataFactor")[0]
+        std = rows[[f"dbdtStd{g:03d}" for g in gates]].to_numpy()
+        parts.append(pd.DataFrame(np.c_[data, std, rows["TxCurrent"]], index=rows.index,
+                                  columns=[f"{m}gate{g:03d}" for g in gates] + [f"{m}std{g:03d}" for g in gates] + [f"{m}current"]))
+    tem.data = pd.concat(parts, axis=1).reset_index(drop=True)
+    return tem
+
+
+def noise_model(times, data, current, noise_level, base=0.03):
+    """Relative STD from a noise model: sqrt(base^2 + (N / I (t / 1 ms)^-1/2 / |d|)^2).
+
+    ``data`` is dB/dt normalised by the current [V/(A*m^2)], ``noise_level``
+    N the dB/dt noise at 1 ms [V/m^2] and ``base`` a uniform relative STD
+    (or an array: the data's own relative STDs).
+    """
+    return np.hypot(base, noise_level / current * (np.asarray(times) / 1e-3) ** -0.5 / np.abs(data))
+
+
+def estimate_noise_level(times, data, std, current, base=0.03):
+    """Noise level N [V/m^2 at 1 ms] of a moment from its measured relative STDs.
+
+    Over every gate noisier than the uniform ``base``, the median of the STD
+    that ``base`` leaves, scaled to 1 A and 1 ms. ``data`` and ``std`` are
+    (n_soundings, n_gates); NaN gates are ignored.
+    """
+    excess = (np.asarray(std) * np.abs(data)) ** 2 - (base * np.asarray(data)) ** 2
+    with np.errstate(invalid="ignore"):
+        level = np.sqrt(excess) * current * np.sqrt(np.asarray(times) / 1e-3)
+    return float(np.nanmedian(level[excess > 0]))

@@ -9,9 +9,11 @@
 #include <vector>
 
 InversionWorker::InversionWorker(std::vector<InversionJob> jobs,
-                                 unsigned maximumParallelJobs)
+                                 unsigned maximumParallelJobs,
+                                 std::vector<pytem::SciSettings> sciRuns)
     : m_jobs(std::move(jobs)),
-      m_maximumParallelJobs(maximumParallelJobs)
+      m_maximumParallelJobs(maximumParallelJobs),
+      m_sciRuns(std::move(sciRuns))
 {
 }
 
@@ -43,15 +45,23 @@ void InversionWorker::run()
             northings.push_back(job.northing);
             elevations.push_back(job.elevation);
         }
+        if (m_sciRuns.empty())
+            m_sciRuns.push_back(options.front().sci);
         try {
-            const auto results = pytem::TemSolver::invertSci(
-                options, eastings, northings, elevations, std::min(hardware, requested),
-                [this](std::size_t s, int iteration, double rms, const std::string &detail) {
-                    emit progress(m_jobs[s].index, iteration, rms, QString::fromStdString(detail));
-                },
-                [this]() { return m_cancelled.load(std::memory_order_relaxed); });
-            for (std::size_t s = 0; s < results.size(); ++s)
-                emit resultReady(m_jobs[s].index, results[s]);
+            for (std::size_t run = 0; run < m_sciRuns.size() && !m_cancelled.load(std::memory_order_relaxed); ++run) {
+                for (auto &sounding : options)
+                    sounding.sci = m_sciRuns[run];
+                const QString prefix = m_sciRuns.size() > 1
+                    ? QString("run %1/%2, ").arg(run + 1).arg(m_sciRuns.size()) : QString();
+                const auto results = pytem::TemSolver::invertSci(
+                    options, eastings, northings, elevations, std::min(hardware, requested),
+                    [this, &prefix](std::size_t s, int iteration, double rms, const std::string &detail) {
+                        emit progress(m_jobs[s].index, iteration, rms, prefix + QString::fromStdString(detail));
+                    },
+                    [this]() { return m_cancelled.load(std::memory_order_relaxed); });
+                for (std::size_t s = 0; s < results.size(); ++s)
+                    emit resultReady(m_jobs[s].index, results[s]);
+            }
         } catch (const std::exception &error) {
             if (!m_cancelled.load(std::memory_order_relaxed))
                 for (const auto &job : m_jobs)

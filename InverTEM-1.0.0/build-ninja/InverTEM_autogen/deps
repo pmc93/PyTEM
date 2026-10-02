@@ -470,18 +470,22 @@ InverTEM_autogen/timestamp: \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/build-ninja/CMakeFiles/4.2.5/CMakeSystem.cmake \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/CudaForward.cu \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/CudaForward.h \
+	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/ElevationModel.cpp \
+	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/ElevationModel.h \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/InversionWorker.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/InversionWorker.h \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/JacobianCache.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/JacobianCache.h \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MainWindow.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MainWindow.h \
+	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MainWindowHelpers.h \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MapTileLoader.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MapTileLoader.h \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MatrixConvolution.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/MatrixConvolution.h \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/PlotWidget.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/PlotWidget.h \
+	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/Processing.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/TemSolver.cpp \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/TemSolver.h \
 	C:/Users/pamcl/OneDrive\ -\ Danmarks\ Tekniske\ Universitet/Dokumenter/Projects/Python/pyTEM/InverTEM-1.0.0/src/TransformWeights.h \

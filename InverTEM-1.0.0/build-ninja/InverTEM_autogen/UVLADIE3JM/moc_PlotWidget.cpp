@@ -47,7 +47,8 @@ template <> constexpr inline auto PlotWidget::qt_create_metaobjectdata<qt_meta_t
         "pointsRightDragged",
         "QList<int>",
         "pointIds",
-        "restore"
+        "restore",
+        "pointsSelected"
     };
 
     QtMocHelpers::UintData qt_methods {
@@ -62,6 +63,10 @@ template <> constexpr inline auto PlotWidget::qt_create_metaobjectdata<qt_meta_t
         // Signal 'pointsRightDragged'
         QtMocHelpers::SignalData<void(const QVector<int> &, bool)>(5, 2, QMC::AccessPublic, QMetaType::Void, {{
             { 0x80000000 | 6, 7 }, { QMetaType::Bool, 8 },
+        }}),
+        // Signal 'pointsSelected'
+        QtMocHelpers::SignalData<void(const QVector<int> &)>(9, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { 0x80000000 | 6, 7 },
         }}),
     };
     QtMocHelpers::UintData qt_properties {
@@ -89,6 +94,7 @@ void PlotWidget::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, 
         case 0: _t->pointClicked((*reinterpret_cast<std::add_pointer_t<int>>(_a[1]))); break;
         case 1: _t->pointRightClicked((*reinterpret_cast<std::add_pointer_t<int>>(_a[1]))); break;
         case 2: _t->pointsRightDragged((*reinterpret_cast<std::add_pointer_t<QList<int>>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<bool>>(_a[2]))); break;
+        case 3: _t->pointsSelected((*reinterpret_cast<std::add_pointer_t<QList<int>>>(_a[1]))); break;
         default: ;
         }
     }
@@ -96,6 +102,13 @@ void PlotWidget::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, 
         switch (_id) {
         default: *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType(); break;
         case 2:
+            switch (*reinterpret_cast<int*>(_a[1])) {
+            default: *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType(); break;
+            case 0:
+                *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType::fromType< QList<int> >(); break;
+            }
+            break;
+        case 3:
             switch (*reinterpret_cast<int*>(_a[1])) {
             default: *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType(); break;
             case 0:
@@ -110,6 +123,8 @@ void PlotWidget::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, 
         if (QtMocHelpers::indexOfMethod<void (PlotWidget::*)(int )>(_a, &PlotWidget::pointRightClicked, 1))
             return;
         if (QtMocHelpers::indexOfMethod<void (PlotWidget::*)(const QVector<int> & , bool )>(_a, &PlotWidget::pointsRightDragged, 2))
+            return;
+        if (QtMocHelpers::indexOfMethod<void (PlotWidget::*)(const QVector<int> & )>(_a, &PlotWidget::pointsSelected, 3))
             return;
     }
 }
@@ -133,14 +148,14 @@ int PlotWidget::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 3)
+        if (_id < 4)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 3;
+        _id -= 4;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 3)
+        if (_id < 4)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 3;
+        _id -= 4;
     }
     return _id;
 }
@@ -161,5 +176,11 @@ void PlotWidget::pointRightClicked(int _t1)
 void PlotWidget::pointsRightDragged(const QVector<int> & _t1, bool _t2)
 {
     QMetaObject::activate<void>(this, &staticMetaObject, 2, nullptr, _t1, _t2);
+}
+
+// SIGNAL 3
+void PlotWidget::pointsSelected(const QVector<int> & _t1)
+{
+    QMetaObject::activate<void>(this, &staticMetaObject, 3, nullptr, _t1);
 }
 QT_WARNING_POP

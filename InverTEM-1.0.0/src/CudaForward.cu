@@ -3,11 +3,19 @@
 #include "TransformWeights.h"
 
 #include <cuda_runtime.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 #include <thrust/complex.h>
 
 #include <algorithm>
 #include <cmath>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -23,7 +31,6 @@ constexpr double mu0 = 4.0e-7 * pi;
 __constant__ double cFourierBase[fourierCount];
 __constant__ double cFourierSin[fourierCount];
 
-std::once_flag weightsOnce;
 bool weightsReady = false;
 std::string weightsError;
 
@@ -170,20 +177,30 @@ bool copyToDevice(DeviceBuffer<T> &buffer, const std::vector<T> &values,
 
 } // namespace
 
+// Probed once. Without the NVIDIA driver (nvcuda.dll) the CUDA runtime is not
+// touched at all; GPUs older than CUDA 13's minimum (compute 7.5) are refused.
 bool cudaForwardAvailable(std::string *reason)
 {
-    int count = 0;
-    const cudaError_t status = cudaGetDeviceCount(&count);
-    if (status != cudaSuccess || count < 1) {
-        if (reason)
-            *reason = status == cudaSuccess ? "No CUDA-capable GPU detected"
-                                            : cudaMessage(status);
-        return false;
-    }
-    std::call_once(weightsOnce, initializeWeights);
-    if (!weightsReady && reason)
-        *reason = weightsError;
-    return weightsReady;
+    static const std::string problem = [] () -> std::string {
+#ifdef _WIN32
+        if (!LoadLibraryExW(L"nvcuda.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32))
+            return "No NVIDIA driver installed";
+#endif
+        int count = 0, major = 0, minor = 0;
+        cudaError_t status = cudaGetDeviceCount(&count);
+        if (status != cudaSuccess || count < 1)
+            return status == cudaSuccess ? "No CUDA-capable GPU detected" : cudaMessage(status);
+        if ((status = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, 0)) != cudaSuccess
+            || (status = cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, 0)) != cudaSuccess)
+            return cudaMessage(status);
+        if (major * 10 + minor < 75)
+            return "GPU compute capability " + std::to_string(major) + "." + std::to_string(minor) + " is below 7.5";
+        initializeWeights();
+        return weightsReady ? std::string() : weightsError;
+    }();
+    if (reason && !problem.empty())
+        *reason = problem;
+    return problem.empty();
 }
 
 bool cudaStepResponse(const ForwardModel &model,

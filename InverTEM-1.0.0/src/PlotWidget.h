@@ -39,6 +39,8 @@ public:
     void setEqualAspect(bool enabled, double xScale = 1.0);
     void setGeographicScaleBar(bool enabled);
     void setLegendBackground(bool enabled);
+    void setLegendCorner(Qt::Corner corner);
+    void setLegendToggle(bool enabled); // clicking the legend hides it, leaving a small "Legend" tab (legends can always be dragged)
     void setTickLabelsVisible(bool visible);
     void setMarkerRadius(double radius);
     void setMinimumY(double value);
@@ -57,6 +59,7 @@ signals:
     void pointClicked(int pointId);
     void pointRightClicked(int pointId);
     void pointsRightDragged(const QVector<int> &pointIds, bool restore); // restore = Shift held
+    void pointsSelected(const QVector<int> &pointIds); // Ctrl + right-click or right-drag
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -89,6 +92,15 @@ private:
     double m_xAspectScale = 1.0;
     bool m_geographicScaleBar = false;
     bool m_legendBackground = false;
+    Qt::Corner m_legendCorner = Qt::TopRightCorner;
+    bool m_legendToggle = false;
+    bool m_legendHidden = false;
+    QRectF m_legendRect;
+    QPointF m_legendOffset;      // dragged away from its corner
+    QPointF m_legendPressOffset;
+    QPointF m_legendPress;
+    bool m_legendDragging = false;
+    bool m_legendMoved = false;
     bool m_tickLabelsVisible = true;
     double m_markerRadius = 3.2;
     double m_minimumY = std::numeric_limits<double>::quiet_NaN();

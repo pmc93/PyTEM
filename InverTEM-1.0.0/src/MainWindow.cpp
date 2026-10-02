@@ -1,4 +1,6 @@
 #include "MainWindow.h"
+#include "MainWindowHelpers.h"
+#include "ElevationModel.h"
 #include "InversionWorker.h"
 #include "MapTileLoader.h"
 #include "MatrixConvolution.h"
@@ -14,6 +16,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -23,15 +26,21 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QDialog>
 #include <QLabel>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QUrl>
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSaveFile>
+#include <QSet>
 #include <QSettings>
 #include <QShortcut>
 #include <QScreen>
@@ -40,20 +49,31 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QScrollArea>
 #include <QSplitter>
+#include <QStyle>
+#include <QTextBlock>
+#include <QTextDocument>
 #include <QTextStream>
 #include <QThread>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstddef>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <thread>
+#include <utility>
+
+using namespace invertem;
 
 namespace {
 
@@ -64,8 +84,7 @@ constexpr int pytemJointIterations = 50;
 constexpr int pytemJointAlphaTrials = 5;
 constexpr int pytemJointStepCount = 75;
 constexpr double pytemJointMaxRelativeError = 0.5; // notebook MAX_NOISE
-constexpr int transectPointIdOffset = 1000000;
-constexpr int fastSciLin = 2, fastSciLog = 3; // Model norm entries that select TemSolver::invertSci
+constexpr int fastSciLin = 2, fastSciLog = 3, sciAdaptive = 4; // Model norm entries that select TemSolver::invertSci
 
 int detectedCpuCoreCount()
 {
@@ -76,33 +95,6 @@ int detectedCpuCoreCount()
     return static_cast<int>(std::max(1u, standardCount));
 }
 
-bool validMapCoordinate(const pytem::UsfSounding &sounding)
-{
-    return std::isfinite(sounding.longitude)
-        && std::isfinite(sounding.latitude)
-        && (sounding.longitude != 0.0 || sounding.latitude != 0.0);
-}
-
-double soundingDistanceMetres(const pytem::UsfSounding &first,
-                              const pytem::UsfSounding &second)
-{
-    if (!validMapCoordinate(first) || !validMapCoordinate(second))
-        return 1.0;
-    constexpr double radians = 3.14159265358979323846 / 180.0;
-    constexpr double earthRadius = 6371000.0;
-    const double latitude1 = first.latitude * radians;
-    const double latitude2 = second.latitude * radians;
-    const double deltaLatitude = (second.latitude - first.latitude) * radians;
-    const double deltaLongitude = (second.longitude - first.longitude) * radians;
-    const double a = std::sin(deltaLatitude * 0.5)
-            * std::sin(deltaLatitude * 0.5)
-        + std::cos(latitude1) * std::cos(latitude2)
-            * std::sin(deltaLongitude * 0.5)
-            * std::sin(deltaLongitude * 0.5);
-    const double distance = 2.0 * earthRadius
-        * std::atan2(std::sqrt(a), std::sqrt(std::max(0.0, 1.0 - a)));
-    return std::isfinite(distance) && distance > 0.0 ? distance : 1.0;
-}
 
 QDoubleSpinBox *makeDoubleSpin(double minimum, double maximum, double value,
                                int decimals = 2, double step = 1.0)
@@ -168,6 +160,8 @@ QJsonObject usfJson(const pytem::UsfSounding &sounding)
     QJsonObject object;
     object["name"] = QString::fromStdString(sounding.soundingName);
     object["date"] = QString::fromStdString(sounding.date);
+    if (std::isfinite(sounding.time))
+        object["time"] = sounding.time;
     object["voltage_units"] = QString::fromStdString(sounding.voltageUnits);
     object["epsg"] = sounding.epsg;
     object["number"] = sounding.soundingNumber;
@@ -208,6 +202,7 @@ pytem::UsfSounding usfFromJson(const QJsonObject &object)
     pytem::UsfSounding sounding;
     sounding.soundingName = object["name"].toString().toStdString();
     sounding.date = object["date"].toString().toStdString();
+    sounding.time = object["time"].toDouble(std::numeric_limits<double>::quiet_NaN());
     sounding.voltageUnits = object["voltage_units"].toString().toStdString();
     sounding.epsg = object["epsg"].toInt();
     sounding.soundingNumber = object["number"].toInt();
@@ -364,6 +359,12 @@ QJsonObject optionsJson(const pytem::InversionOptions &options)
     object["vectorized_kernel"] = options.vectorizedKernel;
     object["spatial_constraints"] = options.spatialConstraints;
     object["sci_log_data_space"] = options.sci.logDataSpace;
+    object["sci_adaptive"] = options.sci.adaptive;
+    object["sci_vertical_factor"] = options.sci.verticalFactor;
+    object["sci_lateral_factor"] = options.sci.lateralFactor;
+    object["sci_reference_distance"] = options.sci.referenceDistance;
+    object["sci_distance_power"] = options.sci.distancePower;
+    object["sci_elevation_constraints"] = options.sci.elevationConstraints;
     return object;
 }
 
@@ -408,6 +409,12 @@ pytem::InversionOptions optionsFromJson(const QJsonObject &object)
     options.vectorizedKernel = object["vectorized_kernel"].toBool(false);
     options.spatialConstraints = object["spatial_constraints"].toBool(false);
     options.sci.logDataSpace = object["sci_log_data_space"].toBool(false);
+    options.sci.adaptive = object["sci_adaptive"].toBool(false);
+    options.sci.verticalFactor = object["sci_vertical_factor"].toDouble(options.sci.verticalFactor);
+    options.sci.lateralFactor = object["sci_lateral_factor"].toDouble(options.sci.lateralFactor);
+    options.sci.referenceDistance = object["sci_reference_distance"].toDouble(options.sci.referenceDistance);
+    options.sci.distancePower = object["sci_distance_power"].toDouble(options.sci.distancePower);
+    options.sci.elevationConstraints = object["sci_elevation_constraints"].toBool(options.sci.elevationConstraints);
     return options;
 }
 
@@ -473,17 +480,6 @@ pytem::InversionResult resultFromJson(const QJsonObject &object)
     return result;
 }
 
-QColor momentColor(const std::string &name, std::size_t fallbackIndex)
-{
-    const QString upper = QString::fromStdString(name).toUpper();
-    if (upper.contains("HM") || upper.contains("HIGH"))
-        return QColor("#d73027");
-    if (upper.contains("LM") || upper.contains("LOW"))
-        return QColor("#2166ac");
-    const QColor fallback[] = {QColor("#2166ac"), QColor("#d73027"),
-                               QColor("#1b9e77"), QColor("#984ea3")};
-    return fallback[fallbackIndex % 4];
-}
 
 QString formatDuration(qint64 milliseconds)
 {
@@ -505,18 +501,26 @@ double finiteModelDepth(const pytem::InversionOptions &options)
 
 QString savedModelKey(const pytem::InversionOptions &options, int momentChoice)
 {
+    const auto &sci = options.sci; // each SCI parameter combination is its own model
     return QString("%1|%2|%3|%4")
         .arg(momentChoice)
-        .arg(options.spatialConstraints ? (options.sci.logDataSpace ? fastSciLog : fastSciLin)
+        .arg(options.spatialConstraints ? (sci.adaptive ? sciAdaptive : sci.logDataSpace ? fastSciLog : fastSciLin)
                                         : static_cast<int>(options.regularizationNorm))
         .arg(options.model.resistivities.size())
-        .arg(finiteModelDepth(options), 0, 'g', 12);
+        .arg(finiteModelDepth(options), 0, 'g', 12)
+        + (options.spatialConstraints ? QString("|%1|%2|%3|%4|%5").arg(sci.verticalFactor).arg(sci.lateralFactor)
+               .arg(sci.referenceDistance).arg(sci.distancePower).arg(sci.elevationConstraints) : QString());
 }
 
-// "L1 (40 layers, 120.00 m)", or "L1 (40 layers)" for plot legends.
+// "L1 (40 layers, 120.00 m)", or "L1 (40 layers)" for plot legends; SCI models
+// name their constraint settings: "SCI fast v3 l2.5 100 m p0.5 (...)".
 QString savedModelLabel(const pytem::InversionOptions &options, bool withDepth = true)
 {
-    const QString norm = options.spatialConstraints ? (options.sci.logDataSpace ? "SCI" : "SCI lin")
+    const auto &sci = options.sci;
+    const QString norm = options.spatialConstraints
+        ? QString("SCI %1%2 v%3 l%4 %5 m p%6%7").arg(sci.adaptive ? "adaptive" : "fast", sci.logDataSpace ? "" : " lin")
+              .arg(sci.verticalFactor, 0, 'g', 3).arg(sci.lateralFactor, 0, 'g', 3).arg(sci.referenceDistance)
+              .arg(sci.distancePower).arg(sci.elevationConstraints ? "" : " depth")
         : options.regularizationNorm == pytem::RegularizationNorm::L1Blocky ? "L1" : "L2";
     const QString depth = withDepth ? QString(", %1 m").arg(finiteModelDepth(options), 0, 'f', 2) : QString();
     return QString("%1 (%2 layers%3)").arg(norm).arg(options.model.resistivities.size()).arg(depth);
@@ -570,6 +574,51 @@ SplitModelCurve splitModelCurveAtDoi(const QVector<QPointF> &points,
     return result;
 }
 
+
+} // namespace
+
+namespace invertem {
+
+bool validMapCoordinate(const pytem::UsfSounding &sounding)
+{
+    return std::isfinite(sounding.longitude)
+        && std::isfinite(sounding.latitude)
+        && (sounding.longitude != 0.0 || sounding.latitude != 0.0);
+}
+
+double soundingDistanceMetres(const pytem::UsfSounding &first,
+                              const pytem::UsfSounding &second)
+{
+    if (!validMapCoordinate(first) || !validMapCoordinate(second))
+        return 1.0;
+    constexpr double radians = 3.14159265358979323846 / 180.0;
+    constexpr double earthRadius = 6371000.0;
+    const double latitude1 = first.latitude * radians;
+    const double latitude2 = second.latitude * radians;
+    const double deltaLatitude = (second.latitude - first.latitude) * radians;
+    const double deltaLongitude = (second.longitude - first.longitude) * radians;
+    const double a = std::sin(deltaLatitude * 0.5)
+            * std::sin(deltaLatitude * 0.5)
+        + std::cos(latitude1) * std::cos(latitude2)
+            * std::sin(deltaLongitude * 0.5)
+            * std::sin(deltaLongitude * 0.5);
+    const double distance = 2.0 * earthRadius
+        * std::atan2(std::sqrt(a), std::sqrt(std::max(0.0, 1.0 - a)));
+    return std::isfinite(distance) && distance > 0.0 ? distance : 1.0;
+}
+
+QColor momentColor(const std::string &name, std::size_t fallbackIndex)
+{
+    const QString upper = QString::fromStdString(name).toUpper();
+    if (upper.contains("HM") || upper.contains("HIGH"))
+        return QColor("#d73027");
+    if (upper.contains("LM") || upper.contains("LOW"))
+        return QColor("#2166ac");
+    const QColor fallback[] = {QColor("#2166ac"), QColor("#d73027"),
+                               QColor("#1b9e77"), QColor("#984ea3")};
+    return fallback[fallbackIndex % 4];
+}
+
 int xyzLineNumber(const pytem::UsfSounding &sounding)
 {
     std::string upper = sounding.soundingName;
@@ -593,13 +642,16 @@ int xyzLineNumber(const pytem::UsfSounding &sounding)
     return sounding.soundingNumber > 0 ? sounding.soundingNumber : 1;
 }
 
-} // namespace
+} // namespace invertem
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
     qRegisterMetaType<pytem::InversionResult>("pytem::InversionResult");
+    qInfo() << "Reading invertem_solver.txt";
     readSolverSettings();
+    qInfo() << "Building interface";
     buildInterface();
+    qInfo() << "Interface built";
     if (const auto *screen = QGuiApplication::primaryScreen()) {
         const QRect available = screen->availableGeometry();
         const int width = std::min(available.width(),
@@ -649,9 +701,18 @@ void MainWindow::buildInterface()
     auto *root = new QVBoxLayout(central);
     setCentralWidget(central);
 
+    // A frameless scroll area: the sidebar and the settings scroll when the window is too short for them.
+    const auto scrollable = [](QWidget *widget) {
+        auto *scroll = new QScrollArea;
+        scroll->setWidget(widget);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        return scroll;
+    };
+    const int scrollBar = style()->pixelMetric(QStyle::PM_ScrollBarExtent);
     auto *informationSidebar = new QWidget;
-    informationSidebar->setMinimumWidth(230);
-    informationSidebar->setMaximumWidth(320);
+    informationSidebar->setMinimumWidth(230 - scrollBar);
     auto *informationLayout = new QVBoxLayout(informationSidebar);
     m_projectLabel = new QLabel("Project: Untitled");
     m_projectLabel->setWordWrap(true);
@@ -668,7 +729,7 @@ void MainWindow::buildInterface()
     projectButtons->addWidget(m_saveProjectButton);
     informationLayout->addWidget(m_projectLabel);
     informationLayout->addLayout(projectButtons);
-    m_importButton = new QPushButton("Import one or more .usf files...");
+    m_importButton = new QPushButton("Import .usf or .xyz files...");
     m_importButton->setToolTip(
         "Add soundings that match the project geometry");
     m_geometryLabel = new QLabel("Geometry: no sounding loaded");
@@ -728,12 +789,40 @@ void MainWindow::buildInterface()
     soundingNavigation->addWidget(m_soundingSelector, 1);
     soundingNavigation->addWidget(m_nextButton);
     informationLayout->addWidget(m_importButton);
+    m_elevationButton = new QPushButton("Ground elevations from DEM...");
+    m_elevationButton->setToolTip(
+        "Replace the GPS heights with terrain heights from DEM files (GeoTIFF or x y z grid) "
+        "or the Copernicus 90 m model (Open-Meteo); GPS heights can drift by metres between passes. "
+        "The GPS heights are kept and can be restored here.");
+    informationLayout->addWidget(m_elevationButton);
     informationLayout->addLayout(soundingNavigation);
+    m_group = new QSpinBox;
+    m_group->setRange(0, 999);
+    m_group->setSpecialValueText("None");
+    m_group->setEnabled(false);
+    m_group->setToolTip("Group of the current sounding (0: none). Shift + left-click on the map puts a sounding in this group.");
+    auto *groupRow = new QHBoxLayout;
+    groupRow->setContentsMargins(0, 0, 0, 0);
+    groupRow->addWidget(new QLabel("Group"));
+    groupRow->addWidget(m_group, 1);
+    informationLayout->addLayout(groupRow);
+    m_groupFilter = new QComboBox;
+    m_groupFilter->addItem("All groups", 0);
+    m_groupFilter->setToolTip("Show and step through only the soundings of one group: their data, models and transect");
+    auto *showRow = new QHBoxLayout;
+    showRow->setContentsMargins(0, 0, 0, 0);
+    showRow->addWidget(new QLabel("Show"));
+    showRow->addWidget(m_groupFilter, 1);
+    informationLayout->addLayout(showRow);
     informationLayout->addWidget(new QLabel("Moment"));
     informationLayout->addWidget(m_moment);
     m_plotMode = new QComboBox;
     m_plotMode->addItem("Single sounding");
     m_plotMode->addItem("Sounding transect");
+    m_yUnit = new QComboBox;
+    m_yUnit->addItems({"|dB/dt|", "Apparent resistivity"});
+    m_yUnit->setToolTip("Show the data as |dB/dt|, or as late-time apparent resistivity");
+
     m_transectSize = new QSpinBox;
     m_transectSize->setRange(2, 500);
     m_transectSize->setValue(30);
@@ -745,6 +834,7 @@ void MainWindow::buildInterface()
     plotModeRow->addWidget(m_plotMode, 1);
     plotModeRow->addWidget(m_transectSize);
     informationLayout->addLayout(plotModeRow);
+    informationLayout->addWidget(m_yUnit);
     auto *transectNavigation = new QHBoxLayout;
     transectNavigation->setContentsMargins(0, 0, 0, 0);
     m_previousTransectButton = new QPushButton("◀");
@@ -778,9 +868,8 @@ void MainWindow::buildInterface()
     informationLayout->addStretch();
 
     auto *workspaceSplitter = new QSplitter(Qt::Horizontal);
-    auto *leftWorkspace = new QWidget;
-    auto *leftWorkspaceLayout = new QVBoxLayout(leftWorkspace);
-    leftWorkspaceLayout->setContentsMargins(0, 0, 0, 0);
+    auto *leftWorkspace = new QSplitter(Qt::Vertical); // plots above the settings, with a divider to drag
+    leftWorkspace->setChildrenCollapsible(false);
     auto *plotSplitter = new QSplitter(Qt::Horizontal);
     m_soundingPlot = new PlotWidget;
     m_soundingPlot->setAxes("TEM data",
@@ -795,6 +884,10 @@ void MainWindow::buildInterface()
     m_modelPlot->setMinimumY(0.0);
     m_modelPlot->setNiceLogXTicks(true);
     m_modelPlot->setLegendBackground(true);
+    m_modelPlot->setLegendToggle(true);
+    m_modelPlot->setLegendCorner(Qt::BottomRightCorner);
+    m_modelPlot->setToolTip("Drag the legend to move it; click it to hide it, and the Legend tab to show it again");
+    m_soundingPlot->setLegendCorner(Qt::BottomLeftCorner);
     auto *singlePlotSplitter = new QSplitter(Qt::Horizontal);
     singlePlotSplitter->addWidget(m_soundingPlot);
     singlePlotSplitter->addWidget(m_modelPlot);
@@ -819,41 +912,52 @@ void MainWindow::buildInterface()
     transectLayout->addWidget(m_transectLowPlot, 1);
     transectLayout->addWidget(m_transectHighPlot, 1);
     m_plotModeStack = new QStackedWidget;
-    m_plotModeStack->addWidget(singlePlotSplitter);
+    auto *singlePage = new QWidget;
+    auto *singleLayout = new QVBoxLayout(singlePage);
+    singleLayout->setContentsMargins(0, 0, 0, 0);
+    m_fileLabel = new QLabel;
+    m_fileLabel->setAlignment(Qt::AlignCenter);
+    m_fileLabel->setStyleSheet("font-weight: bold;");
+    m_fileLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    singleLayout->addWidget(m_fileLabel);
+    singleLayout->addWidget(singlePlotSplitter, 1);
+    m_plotModeStack->addWidget(singlePage);
     m_plotModeStack->addWidget(transectPage);
     auto *mapPanel = new QWidget;
-    mapPanel->setMinimumWidth(460);
     mapPanel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     auto *mapPanelLayout = new QVBoxLayout(mapPanel);
     mapPanelLayout->setContentsMargins(0, 0, 0, 0);
-    auto *mapControls = new QHBoxLayout;
+    // Two short rows, so that the map panel can be narrow on a laptop.
+    auto *mapBackground = new QHBoxLayout, *mapControls = new QHBoxLayout;
     m_noMap = new QRadioButton("No map");
     m_openStreetMap = new QRadioButton("OpenStreetMap");
     m_satelliteMap = new QRadioButton("Satellite map");
     m_mapPointSize = new QComboBox;
-    m_mapPointSize->addItem("Small", 3.2);
-    m_mapPointSize->addItem("Medium", 4.8);
-    m_mapPointSize->addItem("Large", 6.5);
-    m_mapPointSize->addItem("Extra large", 8.5);
-    m_mapPointSize->setCurrentIndex(1);
+    m_mapPointSize->addItem("Small", 1.8);
+    m_mapPointSize->addItem("Medium", 3.2);
+    m_mapPointSize->addItem("Large", 4.8);
     m_mapPointSize->setToolTip(
         "Marker size for sounding points on the map.");
+    m_mapColour = new QComboBox;
+    m_mapColour->addItems({"RMS", "Elevation", "Group"});
+    m_mapColour->setToolTip("Colour the soundings by the inversion RMS, their ground elevation or their group.");
     m_noMap->setChecked(true);
     m_mapProgress = new QProgressBar;
     m_mapProgress->setRange(0, 49);
-    m_mapProgress->setFormat("Map tiles %v/%m");
-    m_mapProgress->setFixedWidth(120);
-    QSizePolicy mapProgressPolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    mapProgressPolicy.setRetainSizeWhenHidden(true);
-    m_mapProgress->setSizePolicy(mapProgressPolicy);
+    m_mapProgress->setFormat("Tiles %v/%m");
+    m_mapProgress->setFixedWidth(90);
     m_mapProgress->setVisible(false);
-    mapControls->addWidget(m_noMap);
-    mapControls->addWidget(m_openStreetMap);
-    mapControls->addWidget(m_satelliteMap);
-    mapControls->addSpacing(10);
+    mapBackground->addWidget(m_noMap);
+    mapBackground->addWidget(m_openStreetMap);
+    mapBackground->addWidget(m_satelliteMap);
+    mapBackground->addStretch();
     mapControls->addWidget(new QLabel("Point size"));
     mapControls->addWidget(m_mapPointSize);
-    mapControls->addWidget(m_mapProgress, 1);
+    mapControls->addSpacing(10);
+    mapControls->addWidget(new QLabel("Colour"));
+    mapControls->addWidget(m_mapColour);
+    mapControls->addStretch();
+    mapControls->addWidget(m_mapProgress);
     m_mapPlot = new PlotWidget;
     m_mapPlot->setAxes("Sounding map (left-click selects; right-click includes/excludes)",
                        "Easting", "Northing", false, false);
@@ -863,13 +967,17 @@ void MainWindow::buildInterface()
     m_mapPlot->setTickLabelsVisible(false);
     m_mapPlot->setMarkerRadius(m_mapPointSize->currentData().toDouble());
     mapPanelLayout->addWidget(m_mapPlot, 1);
+    mapPanelLayout->addLayout(mapBackground);
     mapPanelLayout->addLayout(mapControls);
-    plotSplitter->addWidget(informationSidebar);
+    auto *sidebarScroll = scrollable(informationSidebar);
+    sidebarScroll->setMinimumWidth(230);
+    sidebarScroll->setMaximumWidth(320);
+    plotSplitter->addWidget(sidebarScroll);
     plotSplitter->addWidget(m_plotModeStack);
     plotSplitter->setStretchFactor(0, 0);
     plotSplitter->setStretchFactor(1, 1);
     plotSplitter->setSizes({250, 720});
-    leftWorkspaceLayout->addWidget(plotSplitter, 1);
+    leftWorkspace->addWidget(plotSplitter);
     workspaceSplitter->addWidget(leftWorkspace);
     workspaceSplitter->addWidget(mapPanel);
     workspaceSplitter->setStretchFactor(0, 5);
@@ -892,12 +1000,18 @@ void MainWindow::buildInterface()
         static_cast<int>(pytem::RegularizationNorm::L1Blocky));
     m_regularizationNorm->addItem("L2 smooth",
         static_cast<int>(pytem::RegularizationNorm::L2Smooth));
-    // Fast SCI in log data space; the linear-data-space variant (fastSciLin) is hidden for now.
-    m_regularizationNorm->addItem("SCI", fastSciLog);
+    // SCI in log data space; the linear-data-space variant (fastSciLin) is hidden for now.
+    m_regularizationNorm->addItem("SCI fast", fastSciLog);
     m_regularizationNorm->setItemData(2,
         "Spatially constrained inversion: all included soundings together, with vertical constraints and "
         "constraints between map neighbours (Delaunay), Marquardt damping by step length, as in Lupus. "
-        "Constraint strengths are set in invertem_solver.txt.", Qt::ToolTipRole);
+        "Constraint strengths are set in invertem_solver.txt; lists of values run every combination.", Qt::ToolTipRole);
+    m_regularizationNorm->addItem("SCI adaptive", sciAdaptive);
+    m_regularizationNorm->setItemData(3,
+        "SCI with the smoothest constraints that still fit the data (total RMS <= 1): the constraint factors "
+        "of invertem_solver.txt are scaled from 1/4 to 4 times their log, each run starting from the previous "
+        "models and running to convergence.",
+        Qt::ToolTipRole);
     m_cacheJacobian = new QCheckBox("Reuse/cache first Jacobian");
     m_cacheJacobian->setChecked(true);
     m_cacheJacobian->setToolTip("Shared in memory across parallel jobs and saved on disk for compatible future runs.");
@@ -912,16 +1026,17 @@ void MainWindow::buildInterface()
         : "Adjust alpha independently for each sounding. Invalid or unstable "
           "trials retain the best valid model and fall back to the fixed alpha "
           "sweep. Uncheck for the original reproducible fixed search.");
-    std::string gpuReason;
-    const bool gpuAvailable = pytem::TemSolver::gpuAvailable(&gpuReason);
-    m_useGpu = new QCheckBox("Use NVIDIA GPU (CUDA)");
+    // CUDA is only probed when it can be used (adaptive method with DLF), so
+    // PCs without an NVIDIA GPU never touch it with the default settings.
     const bool dlf = m_transform == pytem::TransformMethod::DigitalLinearFilter;
-    m_useGpu->setChecked(gpuAvailable && dlf && !m_pytemJoint);
-    m_useGpu->setEnabled(gpuAvailable && dlf && !m_pytemJoint);
-    m_useGpu->setToolTip(!gpuAvailable
-        ? QString("CPU only: %1").arg(QString::fromStdString(gpuReason))
-        : (dlf && !m_pytemJoint ? QString("Accelerates DLF forward responses and alpha trials on the GPU.")
-               : QString("GPU acceleration needs method = adaptive and transform = dlf in invertem_solver.txt.")));
+    std::string gpuReason = "GPU acceleration needs method = adaptive and transform = dlf in invertem_solver.txt.";
+    const bool gpuAvailable = dlf && !m_pytemJoint && pytem::TemSolver::gpuAvailable(&gpuReason);
+    qInfo() << "GPU:" << (gpuAvailable ? "available" : gpuReason.c_str());
+    m_useGpu = new QCheckBox("Use NVIDIA GPU (CUDA)");
+    m_useGpu->setChecked(gpuAvailable);
+    m_useGpu->setEnabled(gpuAvailable);
+    m_useGpu->setToolTip(gpuAvailable ? QString("Accelerates DLF forward responses and alpha trials on the GPU.")
+                                      : QString("CPU only: %1").arg(QString::fromStdString(gpuReason)));
 
     auto *columns = new QHBoxLayout;
     columns->addWidget(layerColumn, 1);
@@ -967,10 +1082,19 @@ void MainWindow::buildInterface()
         "change, and culling of gates that break a smooth decay (late-time noise is cut; a moment that "
         "is mostly not smooth is dropped). Replaces manual gate edits.");
     m_autoFilterButton->setEnabled(false);
+    m_averageButton = new QPushButton("Average soundings...");
+    m_averageButton->setToolTip("Average XYZ data along each line in time or distance windows that widen for later gates (as EEMstudio)");
+    m_noiseButton = new QPushButton("Noise model...");
+    m_noiseButton->setToolTip("Set the STDs from a uniform STD and a dB/dt noise level per moment, or reset them");
+    m_highStdButton = new QPushButton("Remove STD ≥ N...");
+    m_highStdButton->setToolTip("Remove every used gate with a relative STD of at least N %");
+    for (auto *button : {m_averageButton, m_noiseButton, m_highStdButton})
+        button->setEnabled(false);
     m_moveKeptButton = new QPushButton("Move kept USF files...");
     m_moveKeptButton->setToolTip(
-        "Move the USF files of every sounding included in the batch (not excluded on the map) "
-        "to a new folder. The project follows the files; gate edits stay in the project.");
+        "Move the USF files of every sounding included in the batch (not excluded on the map, and "
+        "not culled for too few gates) to a new folder. The project follows the files; gate edits "
+        "stay in the project. Not available for XYZ data.");
     m_moveKeptButton->setEnabled(false);
     m_clearResultsButton = new QPushButton("Clear saved results");
     m_clearResultsButton->setToolTip(
@@ -980,7 +1104,7 @@ void MainWindow::buildInterface()
     m_progress->setRange(0, inversionIterations);
     m_progress->setFormat("%p%");
     m_timeEstimate = new QLabel("Elapsed 00:00 — ETA estimating…");
-    m_timeEstimate->setFixedWidth(190);
+    m_timeEstimate->setFixedWidth(m_timeEstimate->sizeHint().width());
     m_status = new QLabel("0/0 completed");
     m_status->setMinimumWidth(0);
     m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -991,19 +1115,31 @@ void MainWindow::buildInterface()
     actions->addWidget(m_timeEstimate);
     actions->addWidget(m_status, 1);
     settings->addLayout(actions);
-    auto *resultActions = new QHBoxLayout;
-    resultActions->addWidget(m_exportModelledButton);
-    resultActions->addWidget(m_autoFilterButton);
-    resultActions->addWidget(m_moveKeptButton);
-    resultActions->addWidget(m_clearResultsButton);
-    resultActions->addStretch();
-    settings->addLayout(resultActions);
+    // Two short rows (data processing, results) keep the window narrow enough for a laptop.
+    for (const auto &row : {std::vector<QPushButton *>{m_autoFilterButton, m_averageButton, m_noiseButton, m_highStdButton},
+                            std::vector<QPushButton *>{m_exportModelledButton, m_moveKeptButton, m_clearResultsButton}}) {
+        auto *rowLayout = new QHBoxLayout;
+        for (auto *button : row)
+            rowLayout->addWidget(button);
+        rowLayout->addStretch();
+        settings->addLayout(rowLayout);
+    }
     m_log = new QPlainTextEdit;
     m_log->setReadOnly(true);
     m_log->setMaximumBlockCount(1000);
+    m_log->setMinimumHeight(40);
     m_log->setMaximumHeight(90);
     settings->addWidget(m_log);
-    leftWorkspaceLayout->addWidget(settingsGroup);
+    auto *settingsScroll = scrollable(settingsGroup);
+    settingsScroll->setMinimumWidth(settingsGroup->minimumSizeHint().width() + scrollBar);
+    leftWorkspace->addWidget(settingsScroll);
+    leftWorkspace->setStretchFactor(0, 1);
+    leftWorkspace->setStretchFactor(1, 0);
+    // Once shown: the settings at their full height when the window has room for it.
+    QTimer::singleShot(0, this, [leftWorkspace, settingsGroup] {
+        const int full = settingsGroup->sizeHint().height();
+        leftWorkspace->setSizes({leftWorkspace->height() - full, full});
+    });
     root->addWidget(workspaceSplitter, 1);
 
     m_elapsedTimer = new QTimer(this);
@@ -1014,7 +1150,10 @@ void MainWindow::buildInterface()
     m_mapRefreshTimer = new QTimer(this);
     m_mapRefreshTimer->setSingleShot(true);
     m_mapRefreshTimer->setInterval(250);
-    connect(m_mapRefreshTimer, &QTimer::timeout, this, &MainWindow::updateMapPlot);
+    connect(m_mapRefreshTimer, &QTimer::timeout, this, [this] {
+        updateTransectPlot();
+        updateMapPlot();
+    });
 
     connect(m_newProjectButton, &QPushButton::clicked,
             this, &MainWindow::newProject);
@@ -1023,6 +1162,7 @@ void MainWindow::buildInterface()
     connect(m_saveProjectButton, &QPushButton::clicked,
             this, &MainWindow::saveProject);
     connect(m_importButton, &QPushButton::clicked, this, &MainWindow::loadUsf);
+    connect(m_elevationButton, &QPushButton::clicked, this, &MainWindow::correctElevations);
     connect(m_soundingSelector, qOverload<int>(&QComboBox::currentIndexChanged),
             this, &MainWindow::selectSounding);
     connect(m_previousButton, &QPushButton::clicked, this, &MainWindow::previousSounding);
@@ -1034,6 +1174,26 @@ void MainWindow::buildInterface()
                     m_mapPointSize->currentData().toDouble());
                 markProjectModified();
             });
+    connect(m_mapColour, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+        updateMapPlot();
+        markProjectModified();
+    });
+    connect(m_group, qOverload<int>(&QSpinBox::valueChanged), this, [this](int group) {
+        auto *state = activeSounding();
+        if (!state || state->group == group)
+            return;
+        state->group = group;
+        markProjectModified();
+        rebuildGroupFilter();
+        updateTransectPlot();
+        updateTransectNavigation();
+        updateMapPlot();
+    });
+    connect(m_groupFilter, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { // to the group's first sounding
+        const auto shown = shownSoundings();
+        const bool keep = shown.empty() || std::binary_search(shown.begin(), shown.end(), m_activeSoundingIndex);
+        navigateToSounding(keep ? m_activeSoundingIndex : shown.front());
+    });
     connect(m_layerCount, qOverload<int>(&QSpinBox::valueChanged), this, &MainWindow::setLayerCount);
     connect(m_autoResistivityAxis, &QCheckBox::toggled, this,
             [this](bool automatic) {
@@ -1123,9 +1283,34 @@ void MainWindow::buildInterface()
             this, &MainWindow::editDataPoints);
     auto *undo = new QShortcut(QKeySequence::Undo, this);
     connect(undo, &QShortcut::activated, this, &MainWindow::undoGateEdit);
+    // Selection (Ctrl + right-drag on a data plot) commands, bookmarks.
+    for (auto *plot : {m_soundingPlot, m_transectLowPlot, m_transectHighPlot})
+        connect(plot, &PlotWidget::pointsSelected, this, &MainWindow::selectPoints);
+    const auto shortcut = [this](const QKeySequence &keys, auto action) {
+        connect(new QShortcut(keys, this), &QShortcut::activated, this, action);
+    };
+    for (const char key : {'Q', 'A', 'N', 'E', 'W'})
+        shortcut(QKeySequence(QString(key)), [this, key] { selectionCommand(key, false); });
+    shortcut(QKeySequence("Shift+E"), [this] { selectionCommand('E', true); });
+    shortcut(QKeySequence("Shift+W"), [this] { selectionCommand('W', true); });
+    shortcut(QKeySequence(Qt::Key_Escape), [this] { selectionCommand(27, false); });
+    for (const auto &[key, add] : {std::pair('1', 0.1), std::pair('2', 0.2), std::pair('5', 0.5), std::pair('0', -1.0)})
+        shortcut(QKeySequence(QString(key)), [this, add = add] { changeSelectionStd(add); });
+    shortcut(QKeySequence("B"), &MainWindow::toggleBookmark);
+    shortcut(QKeySequence("Ctrl+B"), &MainWindow::nextBookmark);
+    connect(m_averageButton, &QPushButton::clicked, this, &MainWindow::averageSoundings);
+    connect(m_noiseButton, &QPushButton::clicked, this, &MainWindow::editNoiseModel);
+    connect(m_highStdButton, &QPushButton::clicked, this, &MainWindow::removeHighStd);
+    connect(m_yUnit, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int unit) {
+        const QString label = unit == 0 ? "|dB/dt| [V/Am²]" : "ρa [Ohm m]";
+        m_soundingPlot->setAxes("TEM data", "Time [s]", label, true, true);
+        m_transectLowPlot->setAxes("LM transect", "", label, false, true);
+        m_transectHighPlot->setAxes("HM transect", "Distance [m]", label, false, true);
+        updateInputPlot();
+        updateTransectPlot();
+    });
     connect(m_transectSize, qOverload<int>(&QSpinBox::valueChanged), this, [this] {
-        if (m_activeSoundingIndex >= 0)
-            m_transectStart = (m_activeSoundingIndex / m_transectSize->value()) * m_transectSize->value();
+        alignTransectPage();
         updateTransectPlot();
         updateTransectNavigation();
         updateMapPlot();
@@ -1180,12 +1365,11 @@ void MainWindow::buildInterface()
 }
 
 MainWindow::SoundingState MainWindow::readSoundingState(
-    const QString &path, const QJsonObject &embedded) const
+    const QString &path, pytem::UsfSounding sounding) const
 {
     SoundingState state;
-    state.sounding = embedded.isEmpty() ? pytem::UsfReader::read(path.toStdString())
-                                        : usfFromJson(embedded);
-    state.path = QFileInfo(path).absoluteFilePath();
+    state.sounding = std::move(sounding);
+    state.path = path.contains('#') ? path : QFileInfo(path).absoluteFilePath(); // file.xyz#Line1_2: one sounding of an XYZ
     state.txRadius = state.sounding.equivalentCircularRadius();
     state.rxOffset = state.sounding.radialReceiverOffset();
     state.geometry = state.rxOffset > 0.0
@@ -1216,11 +1400,12 @@ void MainWindow::updateProjectTitle()
 
 void MainWindow::rebuildSoundingSelector(int selectedIndex)
 {
+    rebuildGroupFilter();
     m_soundingSelector->blockSignals(true);
     m_soundingSelector->clear();
     for (std::size_t i = 0; i < m_soundings.size(); ++i) {
         const auto &state = m_soundings[i];
-        m_soundingSelector->addItem(QString("%1/%2  %3 — %4")
+        m_soundingSelector->addItem(QString(state.bookmark ? "★ " : "") + QString("%1/%2  %3 — %4")
             .arg(i + 1).arg(m_soundings.size())
             .arg(QString::fromStdString(state.sounding.soundingName),
                  QFileInfo(state.path).fileName()));
@@ -1228,9 +1413,13 @@ void MainWindow::rebuildSoundingSelector(int selectedIndex)
     m_soundingSelector->blockSignals(false);
     const bool haveSoundings = !m_soundings.empty();
     m_soundingSelector->setEnabled(haveSoundings);
+    m_group->setEnabled(haveSoundings);
     m_runButton->setEnabled(haveSoundings && !m_worker);
-    m_moveKeptButton->setEnabled(haveSoundings && !m_worker);
+    m_moveKeptButton->setEnabled(!m_worker && std::any_of(m_soundings.begin(), m_soundings.end(),
+        [](const SoundingState &state) { return !state.path.contains('#'); })); // USF files, not XYZ data
     m_autoFilterButton->setEnabled(haveSoundings && !m_worker);
+    for (auto *button : {m_averageButton, m_noiseButton, m_highStdButton})
+        button->setEnabled(haveSoundings && !m_worker);
     if (!haveSoundings) {
         m_activeSoundingIndex = -1;
         m_moment->clear();
@@ -1276,6 +1465,9 @@ void MainWindow::resetProjectState()
 {
     resetInversionSettings();
     m_soundings.clear();
+    m_rawSoundings.clear();
+    m_selection.clear();
+    m_noiseLevel.clear();
     m_transectPointReferences.clear();
     m_transectStart = 0;
     m_projectGeometry = {};
@@ -1414,6 +1606,12 @@ bool MainWindow::writeProject(const QString &path)
     settings["map_background"] = m_openStreetMap->isChecked() ? "osm"
         : (m_satelliteMap->isChecked() ? "satellite" : "none");
     settings["map_point_size"] = m_mapPointSize->currentData().toDouble();
+    settings["map_colour"] = m_mapColour->currentText().toLower();
+    settings["noise_uniform_std"] = m_noiseUniformStd;
+    QJsonObject noise;
+    for (const auto &[name, level] : m_noiseLevel)
+        noise[QString::fromStdString(name)] = level;
+    settings["noise_levels"] = noise;
     root["settings"] = settings;
 
     auto gateArrays = [](const std::vector<std::vector<bool>> &moments) {
@@ -1433,6 +1631,16 @@ bool MainWindow::writeProject(const QString &path)
         sounding["data"] = usfJson(state.sounding);
         sounding["moment_choice"] = state.momentChoice;
         sounding["include_in_batch"] = state.includeInBatch;
+        sounding["group"] = state.group;
+        sounding["bookmark"] = state.bookmark;
+        if (!state.originalErrors.empty()) {
+            QJsonArray errors;
+            for (const auto &moment : state.originalErrors)
+                errors.append(jsonArray(moment));
+            sounding["original_errors"] = errors;
+        }
+        if (std::isfinite(state.gpsElevation))
+            sounding["gps_elevation"] = state.gpsElevation;
         sounding["gate_enabled"] = gateArrays(state.gateEnabled);
         if (state.haveResult)
             sounding["active_model_key"] = savedModelKey(
@@ -1541,7 +1749,8 @@ bool MainWindow::readProject(const QString &path)
             const QJsonObject embedded = object["data"].toObject();
             if (embedded.isEmpty() && !QFileInfo::exists(soundingPath))
                 throw std::runtime_error("source USF file was not found");
-            SoundingState state = readSoundingState(soundingPath, embedded);
+            SoundingState state = readSoundingState(soundingPath, embedded.isEmpty()
+                ? pytem::UsfReader::read(soundingPath.toStdString()) : usfFromJson(embedded));
             if (!projectGeometry.locked) {
                 projectGeometry.locked = true;
                 projectGeometry.loopX = state.sounding.loopX;
@@ -1557,6 +1766,11 @@ bool MainWindow::readProject(const QString &path)
             state.momentChoice = object["moment_choice"].toInt(
                 state.momentChoice);
             state.includeInBatch = object["include_in_batch"].toBool(true);
+            state.group = object["group"].toInt();
+            state.bookmark = object["bookmark"].toBool();
+            for (const auto &errors : object["original_errors"].toArray())
+                state.originalErrors.push_back(doubleVector(errors.toArray()));
+            state.gpsElevation = object["gps_elevation"].toDouble(std::numeric_limits<double>::quiet_NaN());
             auto applyGates = [](const QJsonArray &source,
                                  std::vector<std::vector<bool>> &destination) {
                 for (int moment = 0;
@@ -1630,7 +1844,7 @@ bool MainWindow::readProject(const QString &path)
     else if (map == "satellite") m_satelliteMap->setChecked(true);
     else m_noMap->setChecked(true);
     const double savedMapPointSize
-        = settings["map_point_size"].toDouble(4.8);
+        = settings["map_point_size"].toDouble(1.8);
     int mapPointIndex = 0;
     double smallestDifference = std::numeric_limits<double>::infinity();
     for (int index = 0; index < m_mapPointSize->count(); ++index) {
@@ -1643,6 +1857,14 @@ bool MainWindow::readProject(const QString &path)
         }
     }
     m_mapPointSize->setCurrentIndex(mapPointIndex);
+    m_mapColour->setCurrentIndex(std::max(0, m_mapColour->findText(settings["map_colour"].toString(), Qt::MatchFixedString)));
+    m_noiseUniformStd = settings["noise_uniform_std"].toDouble(0.03);
+    m_noiseLevel.clear();
+    const auto noise = settings["noise_levels"].toObject();
+    for (auto entry = noise.begin(); entry != noise.end(); ++entry)
+        m_noiseLevel[entry.key().toStdString()] = entry.value().toDouble();
+    m_rawSoundings.clear();
+    m_selection.clear();
     rebuildSoundingSelector(root["active_sounding"].toInt());
     if (!m_noMap->isChecked() && !m_soundings.empty())
         loadMapTiles();
@@ -1666,13 +1888,15 @@ bool MainWindow::readProject(const QString &path)
 void MainWindow::loadUsf()
 {
     QSettings settings;
-    const QStringList paths = QFileDialog::getOpenFileNames(this, "Open USF soundings",
-        settings.value("lastUsfDirectory").toString(), "Universal Sounding Format (*.usf *.USF);;All files (*)");
+    const QStringList paths = QFileDialog::getOpenFileNames(this, "Open TEM soundings",
+        settings.value("lastUsfDirectory").toString(),
+        "TEM data (*.usf *.USF *.xyz *.XYZ);;Universal Sounding Format (*.usf *.USF);;"
+        "Aarhus Workbench XYZ data export (*.xyz *.XYZ);;All files (*)");
     if (paths.isEmpty()) return;
     std::vector<SoundingState> loaded;
     ProjectGeometry importGeometry = m_projectGeometry;
     QStringList failures;
-    QProgressDialog loading("Loading USF files...", "Cancel", 0, paths.size(), this);
+    QProgressDialog loading("Loading TEM data...", "Cancel", 0, paths.size(), this);
     loading.setWindowTitle("Importing TEM data");
     loading.setWindowModality(Qt::WindowModal);
     loading.setMinimumDuration(0);
@@ -1680,74 +1904,144 @@ void MainWindow::loadUsf()
     loading.setValue(0);
     loading.show();
     QApplication::processEvents();
-    for (int pathIndex = 0; pathIndex < paths.size(); ++pathIndex) {
-        if (loading.wasCanceled())
-            break;
-        const QString &path = paths[pathIndex];
-        loading.setLabelText(QString("Loading %1 (%2 of %3)...")
-            .arg(QFileInfo(path).fileName()).arg(pathIndex + 1).arg(paths.size()));
+    // Files already in the project, compared by canonical path (once, not per file).
+    QSet<QString> present;
+    for (const auto &existing : m_soundings)
+        present.insert(QFileInfo(existing.path.section('#', 0, 0)).canonicalFilePath().toLower());
+    // 1. Collect the work: USF files to read, and the soundings of each XYZ file
+    //    (read here, since it may ask for its system and line files).
+    struct Task { QString path; std::optional<pytem::UsfSounding> sounding; };
+    std::vector<Task> tasks;
+    for (const QString &path : paths) {
+        const QString canonical = QFileInfo(path).canonicalFilePath().toLower();
+        if (present.contains(canonical)) {
+            failures << QString("%1: already present in this project").arg(QFileInfo(path).fileName());
+            continue;
+        }
+        present.insert(canonical);
+        if (!path.endsWith(".xyz", Qt::CaseInsensitive)) { // a USF file is one sounding
+            tasks.push_back({path, std::nullopt});
+            continue;
+        }
+        // A Workbench XYZ export holds many soundings (file.xyz#Line<line>_<n>). The system
+        // (loop, heights, waveforms, filters) comes from a .gex or TEMcompany .xyz beside
+        // the data, else one the user picks, else tTEM defaults.
+        loading.setLabelText(QString("Reading %1...").arg(QFileInfo(path).fileName()));
         QApplication::processEvents();
         try {
-            const QString canonical = QFileInfo(path).canonicalFilePath();
-            const bool duplicate = std::any_of(
-                m_soundings.begin(), m_soundings.end(),
-                [&canonical](const SoundingState &existing) {
-                    return QFileInfo(existing.path).canonicalFilePath()
-                        .compare(canonical, Qt::CaseInsensitive) == 0;
-                }) || std::any_of(
-                    loaded.begin(), loaded.end(),
-                    [&canonical](const SoundingState &existing) {
-                        return QFileInfo(existing.path).canonicalFilePath()
-                            .compare(canonical, Qt::CaseInsensitive) == 0;
-                    });
-            if (duplicate) {
-                failures << QString("%1: already present in this project")
-                    .arg(QFileInfo(path).fileName());
-            } else {
-                SoundingState state = readSoundingState(path);
-                if (!importGeometry.locked) {
-                    importGeometry.locked = true;
-                    importGeometry.loopX = state.sounding.loopX;
-                    importGeometry.loopY = state.sounding.loopY;
-                    importGeometry.coilX = state.sounding.coilX;
-                    importGeometry.coilY = state.sounding.coilY;
-                }
-                pytem::UsfSounding locked;
-                locked.loopX = importGeometry.loopX;
-                locked.loopY = importGeometry.loopY;
-                locked.coilX = importGeometry.coilX;
-                locked.coilY = importGeometry.coilY;
-                if (!pytem::UsfReader::sameSystemGeometry(
-                        locked, state.sounding)) {
-                    failures << QString(
-                        "%1: geometry does not match this project "
-                        "(expected loop %2 × %3 m, coil (%4, %5) m; "
-                        "found loop %6 × %7 m, coil (%8, %9) m)")
-                        .arg(QFileInfo(path).fileName())
-                        .arg(importGeometry.loopX, 0, 'f', 2)
-                        .arg(importGeometry.loopY, 0, 'f', 2)
-                        .arg(importGeometry.coilX, 0, 'f', 2)
-                        .arg(importGeometry.coilY, 0, 'f', 2)
-                        .arg(state.sounding.loopX, 0, 'f', 2)
-                        .arg(state.sounding.loopY, 0, 'f', 2)
-                        .arg(state.sounding.coilX, 0, 'f', 2)
-                        .arg(state.sounding.coilY, 0, 'f', 2);
-                } else {
-                    loaded.push_back(std::move(state));
+            // Raw TEMcompany data describe their own system; processed Workbench data
+            // need a .gex (the one found beside them is offered first).
+            QString system = QString::fromStdString(pytem::UsfReader::findSystemFile(path.toStdString()));
+            const bool raw = QFileInfo(system) == QFileInfo(path);
+            if (!raw)
+                system = QFileDialog::getOpenFileName(this,
+                    QString("System description (.gex) for %1 (Cancel: tTEM defaults)").arg(QFileInfo(path).fileName()),
+                    system.isEmpty() ? QFileInfo(path).absolutePath() : system,
+                    "Workbench .gex or TEMcompany data (*.gex *.GEX *.xyz *.XYZ);;All files (*)");
+            // A line file marks where each raw line starts and ends; records outside (turns) are dropped.
+            const QString lineFile = !raw ? QString() : QFileDialog::getOpenFileName(this,
+                QString("Line file for %1 (Cancel: import all data)").arg(QFileInfo(path).fileName()),
+                QFileInfo(path).absolutePath(), "Line file (*.lin *.LIN);;All files (*)");
+            int skipped = 0;
+            auto soundings = pytem::UsfReader::readWorkbenchXyz(path.toStdString(), system.toStdString(),
+                                                                      lineFile.toStdString(), &skipped);
+            // What the system file gave: loop, receiver, and per moment its frequency, heights, filters and first gate.
+            QStringList summary;
+            if (!soundings.empty()) {
+                const auto &first = soundings.front();
+                summary << QString("loop %1 x %2 m, receiver at (%3, %4) m").arg(first.loopX).arg(first.loopY).arg(first.coilX).arg(first.coilY);
+                for (const auto &moment : first.moments) {
+                    QStringList filters;
+                    for (double frequency : moment.lowPassFrequencies)
+                        filters << QString::number(frequency / 1000.0) + " kHz";
+                    summary << QString("%1 %2 Hz, Tx/Rx %3/%4 m, low-pass %5, gate 1 %6-%7 us").arg(QString::fromStdString(moment.name))
+                        .arg(moment.meanFrequency).arg(moment.txHeight).arg(moment.rxHeight).arg(filters.join(" + "))
+                        .arg(moment.gateOpen.empty() ? 0.0 : moment.gateOpen.front() * 1e6, 0, 'f', 2)
+                        .arg(moment.gateClose.empty() ? 0.0 : moment.gateClose.front() * 1e6, 0, 'f', 2);
                 }
             }
+            for (auto &sounding : soundings)
+                tasks.push_back({QFileInfo(path).absoluteFilePath() + '#' + QString::fromStdString(sounding.soundingName),
+                                 std::move(sounding)});
+            m_log->appendPlainText(QString("%1: %2 soundings; system from %3 (%4); %5").arg(QFileInfo(path).fileName())
+                .arg(soundings.size()).arg(system.isEmpty() ? "tTEM defaults" : QFileInfo(system).fileName(), summary.join("; "))
+                .arg(lineFile.isEmpty() ? QString("no line file, all data imported")
+                     : QString("%1 records outside the lines of %2 skipped").arg(skipped).arg(QFileInfo(lineFile).fileName())));
         } catch (const std::exception &error) {
-            failures << QString("%1: %2").arg(QFileInfo(path).fileName(),
-                                               QString::fromUtf8(error.what()));
+            failures << QString("%1: %2").arg(QFileInfo(path).fileName(), QString::fromUtf8(error.what()));
         }
-        loading.setValue(pathIndex + 1);
-        QApplication::processEvents();
+    }
+    // 2. Read the USF files and select the gates on half the machine's cores.
+    std::vector<std::optional<SoundingState>> states(tasks.size());
+    std::vector<QString> errors(tasks.size());
+    std::atomic_size_t next{0}, done{0};
+    std::atomic_bool cancel{false};
+    std::vector<std::thread> workers;
+    for (unsigned w = 0; w < std::max(1u, std::thread::hardware_concurrency() / 2); ++w)
+        workers.emplace_back([&] {
+            for (std::size_t i; !cancel && (i = next++) < tasks.size(); ++done) {
+                try {
+                    auto &task = tasks[i];
+                    states[i] = readSoundingState(task.path, task.sounding ? std::move(*task.sounding)
+                                                                           : pytem::UsfReader::read(task.path.toStdString()));
+                } catch (const std::exception &error) {
+                    errors[i] = QString::fromUtf8(error.what());
+                }
+            }
+        });
+    loading.setMaximum(static_cast<int>(tasks.size()));
+    loading.setLabelText(QString("Loading %1 sounding(s)...").arg(tasks.size()));
+    while (done < tasks.size() && !cancel) {
+        loading.setValue(static_cast<int>(done));
+        QApplication::processEvents(QEventLoop::AllEvents, 50);
+        cancel = loading.wasCanceled();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    for (auto &worker : workers)
+        worker.join();
+    // 3. Keep the soundings that match the project's system geometry, in order.
+    for (std::size_t i = 0; i < tasks.size() && !cancel; ++i) {
+        if (!states[i]) {
+            failures << QString("%1: %2").arg(QFileInfo(tasks[i].path).fileName(), errors[i]);
+            continue;
+        }
+        SoundingState &state = *states[i];
+        if (!importGeometry.locked) {
+            importGeometry.locked = true;
+            importGeometry.loopX = state.sounding.loopX;
+            importGeometry.loopY = state.sounding.loopY;
+            importGeometry.coilX = state.sounding.coilX;
+            importGeometry.coilY = state.sounding.coilY;
+        }
+        pytem::UsfSounding locked;
+        locked.loopX = importGeometry.loopX;
+        locked.loopY = importGeometry.loopY;
+        locked.coilX = importGeometry.coilX;
+        locked.coilY = importGeometry.coilY;
+        if (!pytem::UsfReader::sameSystemGeometry(locked, state.sounding)) {
+            failures << QString(
+                "%1: geometry does not match this project "
+                "(expected loop %2 × %3 m, coil (%4, %5) m; "
+                "found loop %6 × %7 m, coil (%8, %9) m)")
+                .arg(QFileInfo(tasks[i].path).fileName())
+                .arg(importGeometry.loopX, 0, 'f', 2)
+                .arg(importGeometry.loopY, 0, 'f', 2)
+                .arg(importGeometry.coilX, 0, 'f', 2)
+                .arg(importGeometry.coilY, 0, 'f', 2)
+                .arg(state.sounding.loopX, 0, 'f', 2)
+                .arg(state.sounding.loopY, 0, 'f', 2)
+                .arg(state.sounding.coilX, 0, 'f', 2)
+                .arg(state.sounding.coilY, 0, 'f', 2);
+        } else {
+            loaded.push_back(std::move(state));
+        }
     }
     loading.close();
     if (loaded.empty()) {
         if (loading.wasCanceled())
             return;
-        QMessageBox::warning(this, "No USF files imported", failures.join("\n"));
+        QMessageBox::warning(this, "No soundings imported", failures.mid(0, 10).join("\n")
+            + (failures.size() > 10 ? QString("\n... and %1 more").arg(failures.size() - 10) : QString()));
         return;
     }
     saveActiveSoundingEdits();
@@ -1761,7 +2055,8 @@ void MainWindow::loadUsf()
     if (!m_noMap->isChecked())
         loadMapTiles();
     if (!failures.isEmpty())
-        QMessageBox::warning(this, "Some USF files were skipped", failures.join("\n"));
+        QMessageBox::warning(this, "Some soundings were skipped", failures.mid(0, 10).join("\n")
+            + (failures.size() > 10 ? QString("\n... and %1 more").arg(failures.size() - 10) : QString()));
 }
 
 MainWindow::SoundingState *MainWindow::activeSounding()
@@ -1837,8 +2132,11 @@ void MainWindow::selectSounding(int index)
     m_moment->blockSignals(false);
     m_moment->setEnabled(m_worker == nullptr);
     selectMoment(momentIndex);
-    m_previousButton->setEnabled(index > 0);
-    m_nextButton->setEnabled(index + 1 < static_cast<int>(m_soundings.size()));
+    updateSoundingNavigation();
+    {
+        const QSignalBlocker blocker(m_group);
+        m_group->setValue(state.group);
+    }
     m_exportModelledButton->setEnabled(state.haveResult && m_worker == nullptr);
     m_clearResultsButton->setEnabled(m_worker == nullptr && std::any_of(
         m_soundings.begin(), m_soundings.end(),
@@ -1850,7 +2148,7 @@ void MainWindow::selectSounding(int index)
     else
         displayInput(state);
     if (m_plotMode && m_plotMode->currentIndex() == 1) {
-        m_transectStart = (index / m_transectSize->value()) * m_transectSize->value();
+        alignTransectPage();
         updateTransectPlot();
         updateTransectNavigation();
     }
@@ -1859,14 +2157,68 @@ void MainWindow::selectSounding(int index)
 
 void MainWindow::previousSounding()
 {
-    if (m_activeSoundingIndex > 0)
-        m_soundingSelector->setCurrentIndex(m_activeSoundingIndex - 1);
+    const auto shown = shownSoundings();
+    const auto it = std::lower_bound(shown.begin(), shown.end(), m_activeSoundingIndex);
+    if (it != shown.begin())
+        m_soundingSelector->setCurrentIndex(*std::prev(it));
 }
 
 void MainWindow::nextSounding()
 {
-    if (m_activeSoundingIndex + 1 < static_cast<int>(m_soundings.size()))
-        m_soundingSelector->setCurrentIndex(m_activeSoundingIndex + 1);
+    const auto shown = shownSoundings();
+    const auto it = std::upper_bound(shown.begin(), shown.end(), m_activeSoundingIndex);
+    if (it != shown.end())
+        m_soundingSelector->setCurrentIndex(*it);
+}
+
+void MainWindow::updateSoundingNavigation()
+{
+    const auto shown = shownSoundings();
+    m_previousButton->setEnabled(std::lower_bound(shown.begin(), shown.end(), m_activeSoundingIndex) != shown.begin());
+    m_nextButton->setEnabled(std::upper_bound(shown.begin(), shown.end(), m_activeSoundingIndex) != shown.end());
+}
+
+// The soundings shown and stepped through: all of them, or those of the group picked under "Show".
+std::vector<int> MainWindow::shownSoundings() const
+{
+    const int group = m_groupFilter->currentData().toInt();
+    std::vector<int> shown;
+    for (int i = 0; i < static_cast<int>(m_soundings.size()); ++i)
+        if (group == 0 || m_soundings[static_cast<std::size_t>(i)].group == group)
+            shown.push_back(i);
+    return shown;
+}
+
+// The soundings on the current transect page (m_transectStart counts shown soundings).
+std::vector<int> MainWindow::transectPage() const
+{
+    const auto shown = shownSoundings();
+    const int count = static_cast<int>(shown.size()), first = std::clamp(m_transectStart, 0, std::max(0, count - 1));
+    return {shown.begin() + first, shown.begin() + std::min(count, first + m_transectSize->value())};
+}
+
+// Puts the current sounding on the transect page.
+void MainWindow::alignTransectPage()
+{
+    const auto shown = shownSoundings();
+    const auto it = std::lower_bound(shown.begin(), shown.end(), m_activeSoundingIndex);
+    if (it != shown.end() && *it == m_activeSoundingIndex)
+        m_transectStart = static_cast<int>(it - shown.begin()) / m_transectSize->value() * m_transectSize->value();
+}
+
+void MainWindow::rebuildGroupFilter()
+{
+    const int current = m_groupFilter->currentData().toInt();
+    std::map<int, int> counts; // soundings per group
+    for (const auto &state : m_soundings)
+        if (state.group > 0)
+            ++counts[state.group];
+    const QSignalBlocker blocker(m_groupFilter);
+    m_groupFilter->clear();
+    m_groupFilter->addItem("All groups", 0);
+    for (const auto &[group, count] : counts)
+        m_groupFilter->addItem(QString("Group %1 (%2 soundings)").arg(group).arg(count), group);
+    m_groupFilter->setCurrentIndex(std::max(0, m_groupFilter->findData(current)));
 }
 
 void MainWindow::selectPlotMode(int index)
@@ -1880,9 +2232,8 @@ void MainWindow::selectPlotMode(int index)
     m_nextTransectButton->setVisible(transect);
     m_transectRangeLabel->setVisible(transect);
     m_transectSize->setVisible(transect);
-    if (transect && m_activeSoundingIndex >= 0)
-        m_transectStart = (m_activeSoundingIndex / m_transectSize->value())
-            * m_transectSize->value();
+    if (transect)
+        alignTransectPage();
     updateTransectPlot();
     updateTransectNavigation();
     updateMapPlot();
@@ -1898,8 +2249,7 @@ void MainWindow::previousTransectPage()
 
 void MainWindow::nextTransectPage()
 {
-    if (m_transectStart + m_transectSize->value()
-        >= static_cast<int>(m_soundings.size()))
+    if (m_transectStart + m_transectSize->value() >= static_cast<int>(shownSoundings().size()))
         return;
     m_transectStart += m_transectSize->value();
     updateTransectPlot();
@@ -1911,7 +2261,7 @@ void MainWindow::updateTransectNavigation()
 {
     if (!m_transectRangeLabel)
         return;
-    const int count = static_cast<int>(m_soundings.size());
+    const int count = static_cast<int>(shownSoundings().size());
     if (count == 0) {
         m_transectRangeLabel->setText("0 / 0");
     } else {
@@ -1933,27 +2283,30 @@ void MainWindow::updateTransectPlot()
     if (!m_transectLowPlot || !m_transectHighPlot)
         return;
     m_transectPointReferences.clear();
-    if (m_soundings.empty()) {
+    const auto page = transectPage();
+    if (page.empty()) {
         m_transectLowPlot->clear();
         m_transectHighPlot->clear();
         return;
     }
-    const int first = std::clamp(m_transectStart, 0,
-        static_cast<int>(m_soundings.size()) - 1);
-    const int last = std::min(static_cast<int>(m_soundings.size()),
-                              first + m_transectSize->value());
-    QVector<double> distances(last - first, 0.0);
-    for (int index = first + 1; index < last; ++index) {
-        distances[index - first] = distances[index - first - 1]
-            + soundingDistanceMetres(
-                m_soundings[static_cast<std::size_t>(index - 1)].sounding,
-                m_soundings[static_cast<std::size_t>(index)].sounding);
-    }
+    // One group: its soundings side by side, as they need not be neighbours.
+    const bool grouped = m_groupFilter->currentData().toInt() > 0;
+    m_transectHighPlot->setAxes("HM transect", grouped ? "Sounding in group" : "Distance [m]",
+                                m_yUnit->currentIndex() == 0 ? "|dB/dt| [V/Am²]" : "ρa [Ohm m]", false, true);
+    QVector<double> distances(static_cast<int>(page.size()), grouped ? 1.0 : 0.0);
+    for (std::size_t k = 1; k < page.size(); ++k)
+        distances[k] = distances[k - 1] + (grouped ? 1.0 : soundingDistanceMetres(
+            m_soundings[static_cast<std::size_t>(page[k - 1])].sounding,
+            m_soundings[static_cast<std::size_t>(page[k])].sounding));
 
     auto buildMomentCurves = [&](bool highMoment) {
         QVector<PlotWidget::Curve> curves;
+        PlotWidget::Curve selected; // drawn over the gate curves
+        selected.color = Qt::black;
+        selected.markers = selected.selectable = true;
+        selected.line = false;
         std::size_t maximumGateCount = 0;
-        for (int index = first; index < last; ++index) {
+        for (int index : page) {
             const auto &state = m_soundings[static_cast<std::size_t>(index)];
             for (std::size_t momentIndex = 0;
                  momentIndex < state.sounding.moments.size(); ++momentIndex) {
@@ -1970,8 +2323,8 @@ void MainWindow::updateTransectPlot()
             PlotWidget::Curve enabled;
             enabled.color = QColor::fromHsvF(
                 maximumGateCount > 1
-                    ? static_cast<double>(gate) / maximumGateCount : 0.58,
-                0.70, 0.82);
+                    ? static_cast<float>(gate) / maximumGateCount : 0.58f,
+                0.70f, 0.82f);
             enabled.markers = true;
             enabled.selectable = true;
             enabled.line = true;
@@ -1980,7 +2333,8 @@ void MainWindow::updateTransectPlot()
             disabled.markers = true;
             disabled.selectable = true;
             disabled.line = false;
-            for (int index = first; index < last; ++index) {
+            for (std::size_t k = 0; k < page.size(); ++k) {
+                const int index = page[k];
                 auto &state = m_soundings[static_cast<std::size_t>(index)];
                 for (std::size_t momentIndex = 0;
                      momentIndex < state.sounding.moments.size(); ++momentIndex) {
@@ -1992,14 +2346,19 @@ void MainWindow::updateTransectPlot()
                         || momentIndex >= state.gateEnabled.size()
                         || gate >= state.gateEnabled[momentIndex].size())
                         continue;
-                    const double value = std::abs(moment.voltages[gate]);
+                    const double value = displayValue(state.sounding, moment.times[gate], moment.voltages[gate]);
                     if (!(value > 0.0) || !std::isfinite(value))
                         continue;
                     const int reference = static_cast<int>(
                         m_transectPointReferences.size());
                     m_transectPointReferences.push_back(
                         {index, momentIndex, gate});
-                    const QPointF point(distances[index - first], value);
+                    const QPointF point(distances[static_cast<int>(k)], value);
+                    if (std::any_of(m_selection.begin(), m_selection.end(), [&](const GateReference &r) {
+                            return r.sounding == index && r.moment == momentIndex && r.gate == gate; })) {
+                        selected.points.push_back(point);
+                        selected.pointIds.push_back(transectPointIdOffset + reference);
+                    }
                     if (state.includeInBatch && state.gateEnabled[momentIndex][gate]) {
                         enabled.points.push_back(point);
                         enabled.pointIds.push_back(
@@ -2016,6 +2375,8 @@ void MainWindow::updateTransectPlot()
             if (!disabled.points.isEmpty())
                 curves.push_back(std::move(disabled));
         }
+        if (!selected.points.isEmpty())
+            curves.push_back(std::move(selected));
         return curves;
     };
     const auto lowCurves = buildMomentCurves(false);
@@ -2041,6 +2402,18 @@ std::vector<const pytem::UsfMoment *> MainWindow::selectedMoments(
 
 // The selected moments that have at least one used gate: a moment the gate
 // filter emptied is left out of the inversion instead of blocking the sounding.
+bool MainWindow::hasUsableGates(const SoundingState &state) const
+{
+    const auto moments = fittedMoments(state);
+    return !moments.empty() && std::all_of(moments.begin(), moments.end(), [&](const pytem::UsfMoment *moment) {
+        const auto momentIndex = static_cast<std::size_t>(moment - state.sounding.moments.data());
+        int used = 0;
+        for (std::size_t gate = 0; gate < moment->times.size(); ++gate)
+            used += gateUsed(state, momentIndex, gate) ? 1 : 0;
+        return used >= 3;
+    });
+}
+
 std::vector<const pytem::UsfMoment *> MainWindow::fittedMoments(const SoundingState &state) const
 {
     auto moments = selectedMoments(state);
@@ -2145,61 +2518,64 @@ void MainWindow::undoGateEdit()
 
 void MainWindow::editGates(const QVector<int> &pointIds, GateEdit edit)
 {
-    if (m_worker || pointIds.isEmpty())
-        return;
-    QVector<TransectPointReference> references;
+    editReferences(resolvePoints(pointIds), edit);
+}
+
+// Plot point ids to gates: transect ids, else rows of the active sounding's plot.
+// Excluded soundings and duplicates are left out.
+std::vector<MainWindow::GateReference> MainWindow::resolvePoints(const QVector<int> &pointIds) const
+{
+    std::vector<GateReference> references;
     for (const int pointId : pointIds) {
-        TransectPointReference reference;
+        GateReference reference;
         if (pointId >= transectPointIdOffset) {
-            const int index = pointId - transectPointIdOffset;
-            if (index < 0
-                || index >= static_cast<int>(m_transectPointReferences.size()))
+            const std::size_t index = static_cast<std::size_t>(pointId - transectPointIdOffset);
+            if (index >= m_transectPointReferences.size())
                 continue;
-            reference = m_transectPointReferences[static_cast<std::size_t>(index)];
+            reference = m_transectPointReferences[index];
         } else {
-            if (pointId < 0
-                || static_cast<std::size_t>(pointId) >= m_rowMomentIndices.size()
-                || m_rowGateIndices.size() != m_rowMomentIndices.size()
-                || m_activeSoundingIndex < 0)
+            if (pointId < 0 || static_cast<std::size_t>(pointId) >= m_rowMomentIndices.size()
+                || m_rowGateIndices.size() != m_rowMomentIndices.size() || m_activeSoundingIndex < 0)
                 continue;
-            reference.soundingIndex = m_activeSoundingIndex;
-            reference.momentIndex = m_rowMomentIndices[static_cast<std::size_t>(pointId)];
-            reference.gateIndex = m_rowGateIndices[static_cast<std::size_t>(pointId)];
+            reference = {m_activeSoundingIndex, m_rowMomentIndices[static_cast<std::size_t>(pointId)],
+                         m_rowGateIndices[static_cast<std::size_t>(pointId)]};
         }
-        if (reference.soundingIndex < 0
-            || reference.soundingIndex >= static_cast<int>(m_soundings.size()))
+        if (reference.sounding < 0 || reference.sounding >= static_cast<int>(m_soundings.size()))
             continue;
-        auto &state = m_soundings[static_cast<std::size_t>(reference.soundingIndex)];
-        if (!state.includeInBatch // excluded soundings keep their gates as they are
-            || reference.momentIndex >= state.gateEnabled.size()
-            || reference.gateIndex
-                >= state.gateEnabled[reference.momentIndex].size())
+        const auto &state = m_soundings[static_cast<std::size_t>(reference.sounding)];
+        if (!state.includeInBatch || reference.moment >= state.gateEnabled.size()
+            || reference.gate >= state.gateEnabled[reference.moment].size())
             continue;
-        const bool duplicate = std::any_of(references.begin(), references.end(),
-            [&reference](const TransectPointReference &candidate) {
-                return candidate.soundingIndex == reference.soundingIndex
-                    && candidate.momentIndex == reference.momentIndex
-                    && candidate.gateIndex == reference.gateIndex;
-            });
-        if (!duplicate)
+        if (std::none_of(references.begin(), references.end(), [&](const GateReference &other) {
+                return other.sounding == reference.sounding && other.moment == reference.moment && other.gate == reference.gate; }))
             references.push_back(reference);
     }
-    if (references.isEmpty())
+    return references;
+}
+
+void MainWindow::editReferences(const std::vector<GateReference> &references, GateEdit edit)
+{
+    if (m_worker || references.empty())
         return;
     std::vector<int> touched;
     for (const auto &reference : references)
-        if (std::find(touched.begin(), touched.end(), reference.soundingIndex) == touched.end())
-            touched.push_back(reference.soundingIndex);
+        if (std::find(touched.begin(), touched.end(), reference.sounding) == touched.end())
+            touched.push_back(reference.sounding);
     pushGateUndo(touched);
     bool activeChanged = false;
     for (const auto &reference : references) {
-        auto &state = m_soundings[static_cast<std::size_t>(reference.soundingIndex)];
-        auto &gates = state.gateEnabled[reference.momentIndex];
-        gates[reference.gateIndex] = edit == GateEdit::Toggle ? !gates[reference.gateIndex] : edit == GateEdit::Restore;
+        auto &state = m_soundings[static_cast<std::size_t>(reference.sounding)];
+        auto &gates = state.gateEnabled[reference.moment];
+        gates[reference.gate] = edit == GateEdit::Toggle ? !gates[reference.gate] : edit == GateEdit::Restore;
         // The model stays on screen, marked out of date, until it is re-inverted.
         state.resultStale = state.haveResult;
-        activeChanged = activeChanged || reference.soundingIndex == m_activeSoundingIndex;
+        activeChanged = activeChanged || reference.sounding == m_activeSoundingIndex;
     }
+    refreshAfterEdit(activeChanged);
+}
+
+void MainWindow::refreshAfterEdit(bool activeChanged)
+{
     markProjectModified();
     if (activeChanged) {
         const auto *active = activeSounding();
@@ -2239,10 +2615,13 @@ void MainWindow::navigateToSounding(int soundingIndex)
     if (soundingIndex < 0
         || soundingIndex >= static_cast<int>(m_soundings.size()))
         return;
+    const int group = m_group->value();
     if (m_soundingSelector->currentIndex() == soundingIndex)
         selectSounding(soundingIndex);
     else
         m_soundingSelector->setCurrentIndex(soundingIndex);
+    if (QApplication::keyboardModifiers() & Qt::ShiftModifier) // Shift + click: into the previous sounding's group
+        m_group->setValue(group);
 }
 
 void MainWindow::changeMapBackground()
@@ -2364,7 +2743,7 @@ pytem::InversionOptions MainWindow::buildOptions(const SoundingState &state) con
     pytem::ForwardModel commonModel;
     commonModel.geometry = state.geometry;
     commonModel.transform = m_transform;
-    commonModel.useGpu = m_useGpu->isChecked();
+    commonModel.useGpu = m_useGpu->isChecked() && m_useGpu->isVisible();
     commonModel.txSize = state.txRadius;
     commonModel.rxX = state.rxOffset;
     commonModel.thicknesses = pytem::TemSolver::logSpacedThicknesses(
@@ -2447,9 +2826,10 @@ pytem::InversionOptions MainWindow::buildOptions(const SoundingState &state) con
     options.jacobianUpdateMethod = m_jacobianUpdate;
     options.broydenRefreshInterval = m_broydenRefresh;
     const int norm = m_regularizationNorm->currentData().toInt();
-    options.spatialConstraints = norm == fastSciLin || norm == fastSciLog;
+    options.spatialConstraints = norm == fastSciLin || norm == fastSciLog || norm == sciAdaptive;
     options.sci = m_sci;
-    options.sci.logDataSpace = norm == fastSciLog;
+    options.sci.logDataSpace = norm != fastSciLin;
+    options.sci.adaptive = norm == sciAdaptive;
     options.regularizationNorm = options.spatialConstraints
         ? pytem::RegularizationNorm::L2Smooth : static_cast<pytem::RegularizationNorm>(norm);
     options.cacheFirstJacobian = m_cacheJacobian->isChecked();
@@ -2471,8 +2851,19 @@ pytem::InversionOptions MainWindow::buildOptions(const SoundingState &state) con
 // always lists everything that can be changed.
 void MainWindow::readSolverSettings()
 {
-    QFile file(QDir(QApplication::applicationDirPath()).filePath("invertem_solver.txt"));
+    QFile file(QDir(qApp->property("exeDir").toString()).filePath("invertem_solver.txt"));
     QStringList seen;
+    m_sci = pytem::SciSettings{}; // a line removed from the file returns to its default
+    // Comma-separated values ("sci_lateral_factor = 1.5, 2.5, 4") run every combination.
+    std::vector<double> vertical{m_sci.verticalFactor}, lateral{m_sci.lateralFactor},
+        reference{m_sci.referenceDistance}, power{m_sci.distancePower};
+    std::vector<bool> elevation{m_sci.elevationConstraints};
+    const auto numbers = [](const QString &text, double minimum) {
+        std::vector<double> list;
+        for (const QString &part : text.split(','))
+            list.push_back(std::max(minimum, part.trimmed().toDouble()));
+        return list;
+    };
     if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QTextStream in(&file);
         while (!in.atEnd()) {
@@ -2492,20 +2883,35 @@ void MainWindow::readSolverSettings()
             else if (key == "broyden_refresh")
                 m_broydenRefresh = std::clamp(value.toInt(), 2, 10);
             else if (key == "sci_vertical_factor")
-                m_sci.verticalFactor = std::max(1.01, value.toDouble());
+                vertical = numbers(value, 1.01);
             else if (key == "sci_lateral_factor")
-                m_sci.lateralFactor = std::max(1.01, value.toDouble());
+                lateral = numbers(value, 1.01);
             else if (key == "sci_reference_distance")
-                m_sci.referenceDistance = std::max(1.0, value.toDouble());
+                reference = numbers(value, 1.0);
             else if (key == "sci_distance_power")
-                m_sci.distancePower = std::max(0.0, value.toDouble());
-            else if (key == "sci_constraints")
-                m_sci.elevationConstraints = value != "depth";
+                power = numbers(value, 0.0);
+            else if (key == "sci_constraints") {
+                elevation.clear();
+                for (const QString &part : value.split(','))
+                    elevation.push_back(part.trimmed() != "depth");
+            }
             else if (key == "sci_max_iterations")
                 m_sci.maxIterations = std::clamp(value.toInt(), 1, 200);
         }
         file.close();
     }
+    m_sciRuns.clear();
+    for (double v : vertical)
+        for (double l : lateral)
+            for (double r : reference)
+                for (double p : power)
+                    for (bool e : elevation) {
+                        auto sci = m_sci;
+                        sci.verticalFactor = v, sci.lateralFactor = l, sci.referenceDistance = r;
+                        sci.distancePower = p, sci.elevationConstraints = e;
+                        m_sciRuns.push_back(sci);
+                    }
+    m_sci = m_sciRuns.front();
     const QList<std::pair<QString, QString>> settings{
         {"method", "method = pytem_joint       # pytem_joint | adaptive (InverTEM adaptive Gauss-Newton)"},
         {"transform", "transform = euler          # euler | dlf (DLF enables the CUDA option)"},
@@ -2516,7 +2922,7 @@ void MainWindow::readSolverSettings()
         {"sci_lateral_factor", QString("sci_lateral_factor = %1   # Fast SCI: factor allowed between neighbours at the reference distance (larger = looser)").arg(m_sci.lateralFactor)},
         {"sci_reference_distance", QString("sci_reference_distance = %1  # Fast SCI: distance [m] at which sci_lateral_factor applies").arg(m_sci.referenceDistance)},
         {"sci_distance_power", QString("sci_distance_power = %1   # Fast SCI: lateral constraint loosens as (distance / reference)^power").arg(m_sci.distancePower)},
-        {"sci_constraints", QString("sci_constraints = %1   # SCI: compare neighbours at the same elevation | depth below the surface")
+        {"sci_constraints", QString("sci_constraints = %1   # SCI: elevation (overlapping layers at the same elevation; depth is used when heights disagree between passes) | depth")
              .arg(m_sci.elevationConstraints ? "elevation" : "depth")},
         {"sci_max_iterations", QString("sci_max_iterations = %1   # Fast SCI: iteration limit").arg(m_sci.maxIterations)}};
     QStringList missing;
@@ -2529,6 +2935,126 @@ void MainWindow::readSolverSettings()
             out << "# InverTEM solver settings, read at start-up and before every batch\n";
         out << missing.join('\n') << '\n';
     }
+}
+
+// Ground elevations from a terrain model instead of the GPS heights, which can
+// drift by metres between passes: DEM files (GeoTIFF or an x y z grid, e.g. the
+// Lower Saxony DGM1 or the Danish DHM) or Copernicus GLO-90 (90 m cells) from the
+// Open-Meteo elevation API. Soundings outside the model keep their heights.
+void MainWindow::correctElevations()
+{
+    if (m_soundings.empty())
+        return;
+    QMessageBox choice(QMessageBox::Question, "Ground elevations",
+                       "Replace the soundings' GPS heights with terrain heights from:", QMessageBox::Cancel, this);
+    const auto *files = choice.addButton("DEM files (GeoTIFF / x y z)...", QMessageBox::AcceptRole);
+    const auto *online = choice.addButton("Download Copernicus 90 m", QMessageBox::AcceptRole);
+    const bool corrected = std::any_of(m_soundings.begin(), m_soundings.end(),
+        [](const SoundingState &state) { return std::isfinite(state.gpsElevation); });
+    const auto *revert = corrected ? choice.addButton("Revert to GPS heights", QMessageBox::DestructiveRole) : nullptr;
+    choice.exec();
+    if (revert && choice.clickedButton() == revert) {
+        for (auto &state : m_soundings)
+            if (std::isfinite(state.gpsElevation))
+                state.sounding.elevation = std::exchange(state.gpsElevation, std::numeric_limits<double>::quiet_NaN());
+        m_log->appendPlainText("Ground elevations reverted to the GPS heights");
+        markProjectModified();
+        updateTransectPlot();
+        updateMapPlot();
+        return;
+    }
+    std::vector<double> heights(m_soundings.size(), std::numeric_limits<double>::quiet_NaN());
+    QString source;
+    if (choice.clickedButton() == files) {
+        const QStringList paths = QFileDialog::getOpenFileNames(this, "Terrain model tiles", QString(),
+            "Terrain models (*.tif *.tiff *.xyz *.txt *.csv);;All files (*)");
+        if (paths.isEmpty())
+            return;
+        std::vector<pytem::ElevationGrid> grids;
+        try {
+            for (const QString &path : paths)
+                grids.push_back(pytem::readElevationGrid(path.toStdString()));
+        } catch (const std::exception &error) {
+            QMessageBox::warning(this, "Ground elevations", QString::fromUtf8(error.what()));
+            return;
+        }
+        // UTM tiles (ETRS89 258xx or WGS84 326xx) take the soundings in their zone;
+        // geographic ones take longitude/latitude; others the soundings' own UTM zone.
+        const int epsg = grids.front().epsg;
+        const bool geographic = epsg == 4326 || epsg == 4258;
+        for (std::size_t i = 0; i < m_soundings.size(); ++i) {
+            const auto &sounding = m_soundings[i].sounding;
+            const int zone = epsg / 100 == 258 || epsg / 100 == 326 ? epsg % 100
+                : static_cast<int>(std::floor((sounding.longitude + 180.0) / 6.0)) + 1;
+            const auto [x, y] = geographic ? std::pair(sounding.longitude, sounding.latitude)
+                : pytem::UsfReader::toUtm(sounding.longitude, sounding.latitude, zone);
+            heights[i] = pytem::sampleElevation(grids, x, y);
+        }
+        source = QString("%1 DEM file(s)%2").arg(paths.size()).arg(epsg ? QString(", EPSG:%1").arg(epsg) : QString());
+    } else if (choice.clickedButton() == online) {
+        // Positions rounded to 1/2000 degree (~50 m; the model has 90 m cells), 100 per request.
+        std::map<std::pair<long, long>, std::vector<std::size_t>> cells;
+        for (std::size_t i = 0; i < m_soundings.size(); ++i)
+            cells[{std::lround(m_soundings[i].sounding.latitude * 2000.0),
+                   std::lround(m_soundings[i].sounding.longitude * 2000.0)}].push_back(i);
+        QNetworkAccessManager network;
+        QProgressDialog progress("Downloading Copernicus heights...", "Cancel", 0, static_cast<int>(cells.size()), this);
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(0);
+        int done = 0;
+        for (auto cell = cells.begin(); cell != cells.end() && !progress.wasCanceled();) {
+            std::vector<decltype(cell)> batch;
+            QStringList latitudes, longitudes;
+            for (; cell != cells.end() && batch.size() < 100; ++cell) {
+                batch.push_back(cell);
+                latitudes << QString::number(cell->first.first / 2000.0, 'f', 6);
+                longitudes << QString::number(cell->first.second / 2000.0, 'f', 6);
+            }
+            QNetworkReply *reply = network.get(QNetworkRequest(QUrl("https://api.open-meteo.com/v1/elevation?latitude="
+                + latitudes.join(',') + "&longitude=" + longitudes.join(','))));
+            QEventLoop wait;
+            connect(reply, &QNetworkReply::finished, &wait, &QEventLoop::quit);
+            wait.exec();
+            const QJsonArray values = QJsonDocument::fromJson(reply->readAll()).object()["elevation"].toArray();
+            const QString error = reply->error() != QNetworkReply::NoError ? reply->errorString() : QString();
+            reply->deleteLater();
+            if (!error.isEmpty() || values.size() != static_cast<int>(batch.size())) {
+                QMessageBox::warning(this, "Ground elevations",
+                    "Could not download the Copernicus heights from api.open-meteo.com" + (error.isEmpty() ? QString() : ": " + error));
+                return;
+            }
+            for (std::size_t k = 0; k < batch.size(); ++k)
+                for (std::size_t i : batch[k]->second)
+                    heights[i] = values[static_cast<int>(k)].toDouble(std::numeric_limits<double>::quiet_NaN());
+            progress.setValue(done += static_cast<int>(batch.size()));
+        }
+        if (progress.wasCanceled())
+            return;
+        source = "Copernicus GLO-90 (90 m) from Open-Meteo (open-meteo.com, Copernicus DEM)";
+    } else {
+        return;
+    }
+
+    std::vector<double> changes;
+    for (std::size_t i = 0; i < m_soundings.size(); ++i)
+        if (std::isfinite(heights[i])) {
+            changes.push_back(std::abs(heights[i] - m_soundings[i].sounding.elevation));
+            if (!std::isfinite(m_soundings[i].gpsElevation))
+                m_soundings[i].gpsElevation = m_soundings[i].sounding.elevation;
+            m_soundings[i].sounding.elevation = heights[i];
+        }
+    if (changes.empty()) {
+        QMessageBox::warning(this, "Ground elevations", "No sounding lies on the terrain model.");
+        return;
+    }
+    std::sort(changes.begin(), changes.end());
+    m_log->appendPlainText(QString("Ground elevations of %1 of %2 soundings from %3: median change %4 m, largest %5 m%6")
+        .arg(changes.size()).arg(m_soundings.size()).arg(source)
+        .arg(changes[changes.size() / 2], 0, 'f', 2).arg(changes.back(), 0, 'f', 2)
+        .arg(changes.size() < m_soundings.size() ? "; the others lie outside it and keep their heights" : ""));
+    markProjectModified();
+    updateTransectPlot();
+    updateMapPlot();
 }
 
 void MainWindow::runInversion()
@@ -2659,14 +3185,57 @@ void MainWindow::runInversion()
 #else
     const QString scheduler = "C++ thread scheduler";
 #endif
-    if (firstOptions.spatialConstraints)
+    if (firstOptions.spatialConstraints) {
+        // Elevation constraints need heights that agree between passes over the same
+        // ground; GPS heights can drift by metres between lines. Compare soundings
+        // within 3 m of each other that are not recorded close in sequence (another
+        // pass) and use depth constraints when they typically differ by over 1 m.
+        std::vector<std::size_t> order(jobs.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return jobs[a].easting < jobs[b].easting; });
+        std::vector<double> mismatch;
+        for (std::size_t i = 0; i < order.size(); ++i)
+            for (std::size_t k = i + 1; k < order.size() && jobs[order[k]].easting - jobs[order[i]].easting < 3.0; ++k) {
+                const auto &a = jobs[order[i]], &b = jobs[order[k]];
+                if (std::abs(a.index - b.index) > 20 && std::hypot(a.easting - b.easting, a.northing - b.northing) < 3.0)
+                    mismatch.push_back(std::abs(a.elevation - b.elevation));
+            }
+        double medianMismatch = 0.0;
+        if (!mismatch.empty()) {
+            std::nth_element(mismatch.begin(), mismatch.begin() + mismatch.size() / 2, mismatch.end());
+            medianMismatch = mismatch[mismatch.size() / 2];
+        }
+        QStringList runs;
+        for (auto &sci : m_sciRuns) {
+            const bool requested = sci.elevationConstraints;
+            sci.elevationConstraints = requested && medianMismatch <= 1.0;
+            sci.logDataSpace = firstOptions.sci.logDataSpace;
+            sci.adaptive = firstOptions.sci.adaptive;
+            runs << QString("  %1sci_vertical_factor = %2, sci_lateral_factor = %3, sci_reference_distance = %4 m, "
+                            "sci_distance_power = %5, sci_constraints = %6%7")
+                        .arg(m_sciRuns.size() > 1 ? QString("run %1: ").arg(runs.size() + 1) : QString())
+                        .arg(sci.verticalFactor).arg(sci.lateralFactor).arg(sci.referenceDistance).arg(sci.distancePower)
+                        .arg(sci.elevationConstraints ? "elevation" : "depth")
+                        .arg(requested && !sci.elevationConstraints
+                             ? QString(" (elevation requested, but soundings on different passes within 3 m differ by "
+                                       "%1 m in elevation (median), so neighbours are compared at the same depth)")
+                                   .arg(medianMismatch, 0, 'f', 1)
+                             : QString());
+        }
+        const auto &sci = m_sciRuns.front();
         m_log->appendPlainText(QString(
-            "Starting Fast SCI over %1 sounding(s): %2, %7 data space, vertical factor %3, lateral factor %4 at %5 m "
-            "(distance power %6), Delaunay neighbours at the same %8, step-length Marquardt damping")
-            .arg(jobs.size()).arg(transform).arg(m_sci.verticalFactor).arg(m_sci.lateralFactor)
-            .arg(m_sci.referenceDistance).arg(m_sci.distancePower)
-            .arg(firstOptions.sci.logDataSpace ? "log" : "linear")
-            .arg(m_sci.elevationConstraints ? "elevation" : "depth"));
+            "Starting SCI %1 over %2 sounding(s), %3 transform, %4 run(s), settings read just now from %5:\n%6\n"
+            "  sci_max_iterations = %7, %8 data space, step length %9 -> %10 (x%11 / %12), "
+            "minimum improvement %13 %, Delaunay neighbours, step-length Marquardt damping%14")
+            .arg(sci.adaptive ? "adaptive" : "fast").arg(jobs.size()).arg(transform).arg(m_sciRuns.size())
+            .arg(QDir::toNativeSeparators(QDir(qApp->property("exeDir").toString()).filePath("invertem_solver.txt")))
+            .arg(runs.join('\n'))
+            .arg(sci.maxIterations).arg(sci.logDataSpace ? "log" : "linear")
+            .arg(sci.stepMax).arg(sci.stepMin).arg(sci.stepGrowth).arg(sci.stepShrink)
+            .arg(100.0 * sci.relativeChangeThreshold)
+            .arg(sci.adaptive ? "\n  adaptive: vertical and lateral log factors scaled 0.25-4 times, "
+                                "each run to convergence, the smoothest with total RMS <= 1 is kept" : ""));
+    }
     else if (firstOptions.pytemJoint)
         m_log->appendPlainText(QString(
             "Starting %1 independent pyTEM joint inversion(s): %2, %5%6, shared %3-point step grid, %4 kernel")
@@ -2682,7 +3251,8 @@ void MainWindow::runInversion()
     m_liveRms.assign(m_soundings.size(), std::numeric_limits<double>::quiet_NaN());
     m_completedJobs = 0;
     m_successfulJobs = 0;
-    m_totalJobs = static_cast<int>(jobs.size());
+    m_totalJobs = static_cast<int>(jobs.size() * (firstOptions.spatialConstraints ? m_sciRuns.size() : 1));
+    m_sciJobs = firstOptions.spatialConstraints ? static_cast<int>(jobs.size()) : 0;
     m_status->setText(QString("0/%1 completed").arg(m_totalJobs));
     m_batchKilled = false;
     m_batchTimer.restart();
@@ -2694,8 +3264,8 @@ void MainWindow::runInversion()
     m_elapsedTimer->start();
     setRunning(true);
     m_workerThread = new QThread(this);
-    m_worker = new InversionWorker(std::move(jobs),
-                                   static_cast<unsigned>(m_parallelJobs->value()));
+    m_worker = new InversionWorker(std::move(jobs), static_cast<unsigned>(m_parallelJobs->value()),
+                                   m_sciJobs > 0 ? m_sciRuns : std::vector<pytem::SciSettings>{});
     m_worker->moveToThread(m_workerThread);
     connect(m_workerThread, &QThread::started, m_worker, &InversionWorker::run);
     connect(m_worker, &InversionWorker::progress, this, &MainWindow::showProgress);
@@ -2732,14 +3302,40 @@ void MainWindow::showProgress(int jobIndex, int iteration, double rms, const QSt
     if (!m_batchKilled)
         m_status->setText(QString("%1/%2 completed")
             .arg(m_successfulJobs).arg(m_totalJobs));
-    m_log->appendPlainText(QString("[%1] iteration %2  RMS=%3  %4")
-        .arg(name).arg(iteration).arg(rms, 0, 'f', 2).arg(detail));
+    if (m_soundings[static_cast<std::size_t>(jobIndex)].options.spatialConstraints) {
+        // One SCI iteration reports every sounding with the same totals: log it once.
+        const QString line = QString("SCI iteration %1: %2").arg(iteration).arg(detail.section("; this sounding", 0, 0));
+        if (m_log->document()->lastBlock().text() != line)
+            m_log->appendPlainText(line);
+    } else {
+        m_log->appendPlainText(QString("[%1] iteration %2  RMS=%3  %4")
+            .arg(name).arg(iteration).arg(rms, 0, 'f', 2).arg(detail));
+    }
 }
 
 void MainWindow::inversionComplete(int jobIndex, const pytem::InversionResult &result)
 {
     if (jobIndex < 0 || jobIndex >= static_cast<int>(m_soundings.size())) return;
     auto &state = m_soundings[static_cast<std::size_t>(jobIndex)];
+    // SCI delivers every result at once: a modal progress window blocks clicks
+    // until they are all stored (a QProgressBar, since a modal QProgressDialog
+    // would process the next results recursively inside setValue).
+    if (state.options.spatialConstraints && !m_storingDialog) {
+        m_storingDialog = new QDialog(this, Qt::Dialog | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+        m_storingDialog->setWindowTitle("SCI inversion");
+        m_storingDialog->setModal(true);
+        auto *layout = new QVBoxLayout(m_storingDialog);
+        layout->addWidget(new QLabel("Storing the SCI results..."));
+        auto *bar = new QProgressBar;
+        bar->setRange(0, m_sciJobs);
+        layout->addWidget(bar);
+        m_storingDialog->resize(360, 90);
+        m_storingDialog->show();
+    }
+    if (m_storingDialog)
+        m_storingDialog->findChild<QProgressBar *>()->setValue(m_completedJobs % m_sciJobs + 1);
+    if (state.options.spatialConstraints)
+        state.options.sci = result.sci; // this run's settings, so each combination is saved as its own model
     state.result = result;
     state.haveResult = true;
     state.resultStale = false;
@@ -2768,22 +3364,32 @@ void MainWindow::inversionComplete(int jobIndex, const pytem::InversionResult &r
     m_jobIterations[static_cast<std::size_t>(jobIndex)] = state.options.maxIterations;
     m_progress->setValue(std::accumulate(m_jobIterations.begin(), m_jobIterations.end(), 0));
     updateBatchTiming();
-    m_log->appendPlainText(QString("[%1] finished: %2; first Jacobian: %3")
-        .arg(QFileInfo(state.path).fileName(), QString::fromStdString(result.message),
-             QString::fromStdString(result.firstJacobianSource)));
-    m_log->appendPlainText(QString("[%1] timing: total %2 s, Jacobian %3 s, alpha forwards %4 s")
-        .arg(QFileInfo(state.path).fileName())
-        .arg(result.timing.totalSeconds, 0, 'f', 2)
-        .arg(result.timing.jacobianSeconds, 0, 'f', 2)
-        .arg(result.timing.alphaForwardSeconds, 0, 'f', 2));
+    // SCI results share one inversion: a single line, so thousands of soundings
+    // do not push the settings report out of the (1000-line) log.
+    if (state.options.spatialConstraints) {
+        if ((m_completedJobs - 1) % m_sciJobs == 0)
+            m_log->appendPlainText(QString("SCI finished (%1): %2")
+                .arg(savedModelLabel(state.options, false), QString::fromStdString(result.message)));
+        if (m_completedJobs % m_sciJobs == 0 && m_storingDialog) { // a run is stored; the next may still be inverting
+            m_storingDialog->deleteLater();
+            m_storingDialog = nullptr;
+        }
+    } else {
+        m_log->appendPlainText(QString("[%1] finished: %2; first Jacobian: %3")
+            .arg(QFileInfo(state.path).fileName(), QString::fromStdString(result.message),
+                 QString::fromStdString(result.firstJacobianSource)));
+        m_log->appendPlainText(QString("[%1] timing: total %2 s, Jacobian %3 s, alpha forwards %4 s")
+            .arg(QFileInfo(state.path).fileName())
+            .arg(result.timing.totalSeconds, 0, 'f', 2)
+            .arg(result.timing.jacobianSeconds, 0, 'f', 2)
+            .arg(result.timing.alphaForwardSeconds, 0, 'f', 2));
+    }
     if (jobIndex == m_activeSoundingIndex)
         displayResult(state);
-    updateTransectPlot();
-    updateMapPlot();
-    // Result signals arrive while the worker continues with the remaining
-    // soundings. Repaint now so each newly completed marker fills immediately
-    // instead of waiting for the batch to finish or another window event.
-    m_mapPlot->repaint();
+    // Map and transect are redrawn at most every 250 ms: SCI delivers every
+    // result at once, and redrawing thousands of soundings per result is slow.
+    if (!m_mapRefreshTimer->isActive())
+        m_mapRefreshTimer->start();
     m_status->setText(QString("%1/%2 completed")
         .arg(m_successfulJobs).arg(m_totalJobs));
 }
@@ -2811,8 +3417,11 @@ void MainWindow::batchFinished()
 {
     const bool wasKilled = m_batchKilled;
     const int successful = m_successfulJobs;
+    delete m_storingDialog;
+    m_storingDialog = nullptr;
     finishWorker();
     m_liveRms.clear();
+    updateTransectPlot();
     updateMapPlot();
     writeTimingReport();
     if (const auto *state = activeSounding()) {
@@ -3097,42 +3706,64 @@ void MainWindow::displayInput(const SoundingState &)
 void MainWindow::updateInputPlot()
 {
     const auto *state = activeSounding();
+    m_fileLabel->setText(state ? QFileInfo(state->path).fileName() : QString());
     if (!state) {
         m_soundingPlot->clear();
         return;
     }
+    const bool resistivity = m_yUnit->currentIndex() == 1;
+    // Error bars follow the plotted value: rho_a varies as (dB/dt)^-2/3.
+    const auto bar = [&](double value, double error, double shown) { return resistivity ? 2.0 / 3.0 * error / value * shown : error; };
     QVector<PlotWidget::Curve> curves;
+    // Averaged soundings: their raw soundings in light grey behind.
+    PlotWidget::Curve raw;
+    raw.name = "Raw data";
+    raw.color = QColor(160, 165, 170, 110);
+    raw.markers = true;
+    raw.line = false;
+    for (int source : state->sources)
+        if (source < static_cast<int>(m_rawSoundings.size()))
+            for (const auto &moment : m_rawSoundings[static_cast<std::size_t>(source)].sounding.moments)
+                for (std::size_t gate = 0; gate < moment.times.size(); ++gate)
+                    raw.points.push_back({moment.times[gate], displayValue(state->sounding, moment.times[gate], moment.voltages[gate])});
+    if (!raw.points.isEmpty())
+        curves.push_back(std::move(raw));
+    PlotWidget::Curve selected;
+    selected.name = "Selected";
+    selected.color = Qt::black;
+    selected.markers = selected.selectable = true;
+    selected.line = false;
     for (std::size_t momentIndex = 0;
          momentIndex < state->sounding.moments.size(); ++momentIndex) {
         QVector<QPointF> used, rejected;
         QVector<int> usedRows, rejectedRows;
         QVector<double> usedErrors, rejectedErrors;
+        const auto &moment = state->sounding.moments[momentIndex];
         for (std::size_t row = 0; row < m_rowMomentIndices.size(); ++row) {
             if (m_rowMomentIndices[row] != momentIndex)
                 continue;
             const std::size_t gate = m_rowGateIndices[row];
-            const auto &moment = state->sounding.moments[momentIndex];
             if (gate >= moment.times.size() || gate >= moment.voltages.size())
                 continue;
             const double time = moment.times[gate];
             const double value = std::abs(moment.voltages[gate]);
-            const double standardError = gate < moment.standardErrors.size()
-                ? std::abs(moment.standardErrors[gate]) : 0.0;
+            const double shown = displayValue(state->sounding, time, value);
+            const double standardError = bar(value, gate < moment.standardErrors.size()
+                ? std::abs(moment.standardErrors[gate]) : 0.0, shown);
             if (time <= 0.0 || value <= 0.0)
                 continue;
-            if (state->includeInBatch && state->gateEnabled[momentIndex][gate]) {
-                used.push_back({time, value});
-                usedRows.push_back(static_cast<int>(row));
-                usedErrors.push_back(standardError);
-            } else {
-                rejected.push_back({time, value});
-                rejectedRows.push_back(static_cast<int>(row));
-                rejectedErrors.push_back(standardError);
+            const bool isUsed = state->includeInBatch && state->gateEnabled[momentIndex][gate];
+            (isUsed ? used : rejected).push_back({time, shown});
+            (isUsed ? usedRows : rejectedRows).push_back(static_cast<int>(row));
+            (isUsed ? usedErrors : rejectedErrors).push_back(standardError);
+            if (std::any_of(m_selection.begin(), m_selection.end(), [&](const GateReference &r) {
+                    return r.sounding == m_activeSoundingIndex && r.moment == momentIndex && r.gate == gate; })) {
+                selected.points.push_back({time, shown});
+                selected.pointIds.push_back(static_cast<int>(row));
             }
         }
         if (used.isEmpty() && rejected.isEmpty())
             continue;
-        const auto &moment = state->sounding.moments[momentIndex];
         const QString name = QString::fromStdString(moment.name);
         const QColor color = momentColor(moment.name, momentIndex);
         curves.push_back({name + " data", used, color, true, false, true,
@@ -3141,14 +3772,27 @@ void MainWindow::updateInputPlot()
         disabled.setAlpha(150);
         curves.push_back({{}, rejected, disabled, true, false,
                           true, rejectedRows, false, rejectedErrors});
+        // Noise model level, N / I (t / 1 ms)^-1/2.
+        const auto level = m_noiseLevel.find(moment.name);
+        if (level != m_noiseLevel.end() && level->second > 0.0 && !resistivity && moment.meanCurrent > 0.0) {
+            PlotWidget::Curve noise;
+            noise.name = name + " noise";
+            noise.color = color.darker(130);
+            noise.dashed = true;
+            for (double time : moment.times)
+                noise.points.push_back({time, level->second / moment.meanCurrent * std::pow(time / 1e-3, -0.5)});
+            curves.push_back(std::move(noise));
+        }
     }
+    if (!selected.points.isEmpty())
+        curves.push_back(std::move(selected));
     // Predicted response of the shown result, dashed when gates changed since.
     if (state->haveResult) {
         std::size_t offset = 0, dataSet = 0;
         auto addPrediction = [&](const pytem::ForwardModel &model) {
             QVector<QPointF> points;
             for (std::size_t i = 0; i < model.times.size() && offset + i < state->result.predicted.size(); ++i)
-                points.push_back({model.times[i], std::abs(state->result.predicted[offset + i])});
+                points.push_back({model.times[i], displayValue(state->sounding, model.times[i], state->result.predicted[offset + i])});
             offset += model.times.size();
             const std::size_t momentIndex = dataSet < state->resultMomentIndices.size()
                 ? state->resultMomentIndices[dataSet] : dataSet;
@@ -3173,18 +3817,22 @@ void MainWindow::updateMapPlot()
     QVector<int> includedIds;
     QVector<QPointF> excludedPoints;
     QVector<int> excludedIds;
-    QVector<QPointF> unusablePoints;
-    QVector<int> unusableIds;
     QVector<QPointF> activePoint;
     QVector<QPointF> transectPoints;
     QVector<int> transectIds;
     struct CompletedPoint {
         QPointF point;
         int id = -1;
-        double rms = 0.0;
+        double value = 0.0; // RMS, or ground elevation
         bool running = false;
     };
     QVector<CompletedPoint> completedPoints;
+    const bool byGroup = m_mapColour->currentIndex() == 2;
+    std::map<int, PlotWidget::Curve> groupCurves;
+    std::vector<bool> onPage(m_soundings.size(), false);
+    if (m_plotMode && m_plotMode->currentIndex() == 1)
+        for (int index : transectPage())
+            onPage[static_cast<std::size_t>(index)] = true;
     double latitudeSum = 0.0;
     int coordinateCount = 0;
     for (std::size_t i = 0; i < m_soundings.size(); ++i) {
@@ -3195,33 +3843,23 @@ void MainWindow::updateMapPlot()
         const QPointF point(sounding.longitude, sounding.latitude);
         latitudeSum += sounding.latitude;
         ++coordinateCount;
-        // Included soundings the batch would skip (a fitted moment with fewer
-        // than three used gates) are drawn grey like excluded ones.
-        const auto moments = fittedMoments(m_soundings[i]);
-        const bool usable = !moments.empty() && std::all_of(
-            moments.begin(), moments.end(), [&](const pytem::UsfMoment *moment) {
-                const std::size_t momentIndex = static_cast<std::size_t>(
-                    moment - sounding.moments.data());
-                int used = 0;
-                for (std::size_t gate = 0; gate < moment->times.size(); ++gate)
-                    used += gateUsed(m_soundings[i], momentIndex, gate) ? 1 : 0;
-                return used >= 3;
-            });
+        // Included soundings the batch would skip are drawn as excluded.
+        const bool usable = hasUsableGates(m_soundings[i]);
         if (m_soundings[i].includeInBatch && usable) {
             includedPoints.push_back(point);
             includedIds.push_back(static_cast<int>(i));
-        } else if (m_soundings[i].includeInBatch) {
-            unusablePoints.push_back(point);
-            unusableIds.push_back(static_cast<int>(i));
         } else {
             excludedPoints.push_back(point);
             excludedIds.push_back(static_cast<int>(i));
         }
         if (static_cast<int>(i) == m_activeSoundingIndex)
             activePoint.push_back(point);
-        if (m_plotMode && m_plotMode->currentIndex() == 1
-            && static_cast<int>(i) >= m_transectStart
-            && static_cast<int>(i) < m_transectStart + m_transectSize->value()) {
+        if (byGroup && m_soundings[i].group > 0) {
+            auto &curve = groupCurves[m_soundings[i].group];
+            curve.points.push_back(point);
+            curve.pointIds.push_back(static_cast<int>(i));
+        }
+        if (onPage[i]) {
             transectPoints.push_back(point);
             transectIds.push_back(static_cast<int>(i));
         }
@@ -3242,13 +3880,41 @@ void MainWindow::updateMapPlot()
     if (!excludedPoints.isEmpty())
         curves.push_back({"Excluded soundings", excludedPoints, QColor("#b8b8b8"),
                           true, false, true, excludedIds, false});
-    if (!unusablePoints.isEmpty())
-        curves.push_back({"Too few gates", unusablePoints, QColor("#dcdcdc"),
-                          true, false, true, unusableIds, false});
+    // Elevation colours: included soundings, scaled between the 2nd and 98th percentile.
+    const bool elevation = m_mapColour->currentIndex() == 1;
+    double lowest = 0.0, highest = 1.0;
+    if (elevation) {
+        std::vector<double> heights;
+        for (int id : includedIds)
+            heights.push_back(m_soundings[static_cast<std::size_t>(id)].sounding.elevation);
+        std::sort(heights.begin(), heights.end());
+        if (!heights.empty()) {
+            lowest = std::floor(heights[heights.size() / 50]);
+            highest = std::max(lowest + 1.0, std::ceil(heights[heights.size() - 1 - heights.size() / 50]));
+        }
+        completedPoints.clear();
+        for (int k = 0; k < includedIds.size(); ++k)
+            completedPoints.push_back({includedPoints[k], includedIds[k],
+                                       m_soundings[static_cast<std::size_t>(includedIds[k])].sounding.elevation});
+    }
+    if (byGroup)
+        completedPoints.clear();
+    // Ten fixed colours, then hues a golden angle apart (alternating in strength), so every group has its own.
+    static const QColor groupColours[] = {"#e15759", "#59a14f", "#edc948", "#76b7b2", "#ff9da7",
+                                          "#9c755f", "#17becf", "#bcbd22", "#1b7837", "#08306b"};
+    for (auto &[group, curve] : groupCurves) {
+        curve.name = QString("Group %1").arg(group);
+        curve.color = group <= 10 ? groupColours[group - 1]
+            : QColor::fromHsv(static_cast<int>(group * 137.508) % 360, group % 2 ? 230 : 150, group % 3 ? 225 : 150);
+        curve.markers = curve.selectable = curve.filledMarkers = true;
+        curve.line = false;
+        curves.push_back(std::move(curve));
+    }
     for (const auto &completed : completedPoints) {
         PlotWidget::Curve curve;
         curve.points = {completed.point};
-        curve.color = PlotWidget::colorScaleColor(completed.rms, 0.0, 5.0);
+        curve.color = elevation ? PlotWidget::colorScaleColor(completed.value, lowest, highest)
+                                : PlotWidget::colorScaleColor(completed.value, 0.5, 3.0);
         curve.markers = true;
         curve.selectable = true;
         curve.pointIds = {completed.id};
@@ -3267,6 +3933,18 @@ void MainWindow::updateMapPlot()
         visible.line = false;
         curves.push_back(std::move(visible));
     }
+    PlotWidget::Curve bookmarks;
+    bookmarks.name = "Bookmarks";
+    bookmarks.color = Qt::black;
+    bookmarks.markers = bookmarks.filledMarkers = bookmarks.selectable = true;
+    bookmarks.line = false;
+    for (std::size_t i = 0; i < m_soundings.size(); ++i)
+        if (m_soundings[i].bookmark && validMapCoordinate(m_soundings[i].sounding)) {
+            bookmarks.points.push_back({m_soundings[i].sounding.longitude, m_soundings[i].sounding.latitude});
+            bookmarks.pointIds.push_back(static_cast<int>(i));
+        }
+    if (!bookmarks.points.isEmpty())
+        curves.push_back(std::move(bookmarks));
     if (!activePoint.isEmpty())
         curves.push_back({"Current sounding", activePoint, QColor("#f28e2b"),
                           true, false, false, {}, false});
@@ -3279,8 +3957,10 @@ void MainWindow::updateMapPlot()
     }
     if (completedPoints.isEmpty())
         m_mapPlot->clearColorScale();
+    else if (elevation)
+        m_mapPlot->setColorScale("Elevation (m)", lowest, highest);
     else
-        m_mapPlot->setColorScale("RMS", 0.0, 5.0);
+        m_mapPlot->setColorScale("RMS", 0.5, 3.0);
     m_mapPlot->setCurves(curves);
 }
 
@@ -3370,13 +4050,23 @@ void MainWindow::exportModelledData()
         QMessageBox::critical(this, "Export failed", file.errorString());
         return;
     }
+    // Coordinates in UTM: kept when the data already are, otherwise projected
+    // from longitude/latitude into the zone of the survey's mean longitude.
+    const bool utmData = (active->sounding.epsg >= 32601 && active->sounding.epsg <= 32660)
+        || (active->sounding.epsg >= 32701 && active->sounding.epsg <= 32760);
+    double longitudeSum = 0.0, latitudeSum = 0.0;
+    for (const auto &state : m_soundings) {
+        longitudeSum += state.sounding.longitude;
+        latitudeSum += state.sounding.latitude;
+    }
+    const int zone = std::clamp(static_cast<int>(std::floor((longitudeSum / m_soundings.size() + 180.0) / 6.0)) + 1, 1, 60);
+    const int epsg = utmData ? active->sounding.epsg : (latitudeSum >= 0.0 ? 32600 : 32700) + zone;
     QTextStream out(&file);
     out << "Aarhus Workbench XYZ export\n"
         << "DATA TYPE\n"
         << "tTEM/DT\n"
         << "COORDINATE SYSTEM\n"
-        << "epsg:" << (active->sounding.epsg > 0
-                            ? active->sounding.epsg : 4326) << '\n'
+        << "epsg:" << epsg << '\n'
         << "/ LINE_NO UTMX UTMY ELEVATION";
     for (std::size_t layer = 0; layer < layerCount; ++layer)
         out << " RHO" << layer + 1;
@@ -3398,13 +4088,11 @@ void MainWindow::exportModelledData()
         if (saved == state.savedModels.end()
             || saved->result.resistivities.size() != layerCount)
             continue;
-        const double x = state.sounding.sourceX != 0.0
-            ? state.sounding.sourceX : state.sounding.longitude;
-        const double y = state.sounding.sourceY != 0.0
-            ? state.sounding.sourceY : state.sounding.latitude;
+        const auto [x, y] = utmData ? std::pair(state.sounding.sourceX, state.sounding.sourceY)
+            : pytem::UsfReader::toUtm(state.sounding.longitude, state.sounding.latitude, zone);
         out << xyzLineNumber(state.sounding) << ' '
-            << QString::number(x, 'g', 12) << ' '
-            << QString::number(y, 'g', 12) << ' '
+            << QString::number(x, 'f', 2) << ' '
+            << QString::number(y, 'f', 2) << ' '
             << QString::number(state.sounding.elevation, 'g', 12);
         for (double resistivity : saved->result.resistivities)
             out << ' ' << QString::number(resistivity, 'g', 12);
@@ -3438,12 +4126,16 @@ void MainWindow::exportModelledData()
 void MainWindow::setRunning(bool running)
 {
     m_importButton->setEnabled(!running);
+    m_elevationButton->setEnabled(!running);
     m_newProjectButton->setEnabled(!running);
     m_loadProjectButton->setEnabled(!running);
     m_saveProjectButton->setEnabled(!running);
     m_runButton->setEnabled(!running && !m_soundings.empty());
-    m_moveKeptButton->setEnabled(!running && !m_soundings.empty());
+    m_moveKeptButton->setEnabled(!running && std::any_of(m_soundings.begin(), m_soundings.end(),
+        [](const SoundingState &state) { return !state.path.contains('#'); })); // USF files, not XYZ data
     m_autoFilterButton->setEnabled(!running && !m_soundings.empty());
+    for (auto *button : {m_averageButton, m_noiseButton, m_highStdButton})
+        button->setEnabled(!running && !m_soundings.empty());
     m_killButton->setEnabled(running);
     const bool dlf = m_transform == pytem::TransformMethod::DigitalLinearFilter;
     const bool joint = m_pytemJoint;
@@ -3458,8 +4150,7 @@ void MainWindow::setRunning(bool running)
     m_soundingSelector->setEnabled(!m_soundings.empty());
     m_moment->setEnabled(!running && activeSounding());
     m_plotMode->setEnabled(!running);
-    m_previousButton->setEnabled(m_activeSoundingIndex > 0);
-    m_nextButton->setEnabled(m_activeSoundingIndex + 1 < static_cast<int>(m_soundings.size()));
+    updateSoundingNavigation();
     updateTransectNavigation();
     if (running) {
         m_previousTransectButton->setEnabled(false);
@@ -3478,9 +4169,11 @@ void MainWindow::moveKeptUsfFiles()
 {
     if (m_worker)
         return;
+    // Kept: included on the map and not culled by the gate filter (fewer than
+    // three gates left in a fitted moment). Soundings of an XYZ file are not files.
     std::vector<SoundingState *> kept;
     for (auto &state : m_soundings)
-        if (state.includeInBatch)
+        if (state.includeInBatch && hasUsableGates(state) && !state.path.contains('#'))
             kept.push_back(&state);
     if (kept.empty()) {
         QMessageBox::information(this, "Move kept USF files", "No sounding is included in the batch.");
@@ -3493,7 +4186,7 @@ void MainWindow::moveKeptUsfFiles()
         return;
     settings.setValue("lastMoveDirectory", folder);
     if (QMessageBox::question(this, "Move kept USF files",
-            QString("Move %1 USF file(s) to\n%2?\n\n%3 excluded sounding(s) stay where they are.")
+            QString("Move %1 USF file(s) to\n%2?\n\n%3 excluded or culled sounding(s) stay where they are.")
                 .arg(kept.size()).arg(QDir::toNativeSeparators(folder))
                 .arg(m_soundings.size() - kept.size())) != QMessageBox::Yes)
         return;
