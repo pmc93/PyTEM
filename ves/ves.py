@@ -6,6 +6,7 @@ Public API
 forward(ab2, resistivities, thicknesses, filter_set='gs7') -> ndarray
 jacobian(ab2, resistivities, thicknesses, filter_set='gs7') -> ndarray
 invert(ab2, rhoap_obs, resistivities, thicknesses, ...)     -> dict
+fit_system(ab2, rhoap_obs, thicknesses, noise=0.03)        -> dict for pytem.invert_joint
 """
 
 import numpy as np
@@ -482,4 +483,32 @@ def invert(ab2, rhoap_obs, resistivities, thicknesses,
         "rhoap_pred":    rhoap_pred,
         "rms_history":   rms_history,
         "n_iter":        len(rms_history),
+    }
+
+
+def fit_system(ab2, rhoap_obs, thicknesses, noise=0.03, filter_set="gs7"):
+    """
+    VES data as a ``pytem.invert_joint`` fit system, on the layer grid of the
+    inversion (``thicknesses``), so it can be inverted alone or jointly with TEM.
+
+    Parameters
+    ----------
+    ab2 : array_like (M,)       Electrode half-spacings [m].
+    rhoap_obs : array_like (M,) Observed apparent resistivity [Ohm.m].
+    thicknesses : array_like (N-1,) Layer thicknesses of the shared model [m].
+    noise : float or array_like Fractional noise of the apparent resistivities.
+
+    Returns
+    -------
+    dict with 'obs', 'noise' (absolute), 'forward' (ln rho -> rhoap) and
+    'jacobian' (ln rho -> d rhoap / d ln rho, from the analytical Jacobian).
+    """
+    ab2 = np.asarray(ab2, dtype=float)
+    rhoap_obs = np.asarray(rhoap_obs, dtype=float)
+    n = len(thicknesses) + 1
+    return {
+        "obs": rhoap_obs,
+        "noise": np.asarray(noise, dtype=float) * rhoap_obs,
+        "forward": lambda log_rho: forward(ab2, np.exp(log_rho), thicknesses, filter_set),
+        "jacobian": lambda log_rho: jacobian(ab2, np.exp(log_rho), thicknesses, filter_set)[:, :n] * np.exp(log_rho),
     }

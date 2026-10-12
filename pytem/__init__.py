@@ -139,7 +139,8 @@ from .forward import (
     fwd_analytical_offset,
 )
 
-from .waveform import convolve_waveform, setup_waveform, setup_waveform_matrix, setup_shared_gate_matrices
+from .waveform import (convolve_waveform, setup_waveform, setup_waveform_matrix, setup_shared_gate_matrices,
+                       primary_response)
 from .system_filter import butterworth_filter, cascade_filter
 from .euler import euler_invert
 from .inversion import (getJ_ana, getJ_fd, getR, dbdt_to_apprho, getRMS,
@@ -149,7 +150,7 @@ from .plotter import (plot_sounding, plot_model, plot_inversion,
                       plot_survey_models, plot_survey_responses)
 from .benchmarks import benchmark_step_grids
 from .data_io import (TEMData, KenbecTEMData, TunoeTEMData, read_tem_xyz, read_kenbec_xyz,
-                      read_xyz, read_usf, read_workbench_xyz, read_temcompany_xyz, noise_model,
+                      read_xyz, read_usf, read_workbench_xyz, read_temcompany_xyz, read_loupe_dat, noise_model,
                       estimate_noise_level)
 from .survey import Survey
 
@@ -160,6 +161,7 @@ from .ip_models import (
     get_m_taur_MPA,
     mpa_rho,
     tem_forward_ip,
+    tem_forward_pelton_jacobian,
 )
 
 __all__ = [
@@ -182,6 +184,7 @@ __all__ = [
     'setup_waveform',
     'setup_waveform_matrix',
     'setup_shared_gate_matrices',
+    'primary_response',
     'butterworth_filter',
     'cascade_filter',
     # IP models
@@ -191,6 +194,7 @@ __all__ = [
     'get_m_taur_MPA',
     'mpa_rho',
     'tem_forward_ip',
+    'tem_forward_pelton_jacobian',
     # Euler (verification)
     'euler_invert',
     # Inversion
@@ -220,6 +224,7 @@ __all__ = [
     'read_usf',
     'read_workbench_xyz',
     'read_temcompany_xyz',
+    'read_loupe_dat',
     'noise_model',
     'estimate_noise_level',
     'Survey',

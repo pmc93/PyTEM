@@ -80,7 +80,7 @@ def _get_jana_context(thicknesses, times, tx_size,
         a, geometry, float(rx_x), float(rx_y), int(n_quad), bool(use_symmetry),
         transform, hankel_filter, fourier_filter, int(euler_order),
         float(tx_height), float(rx_height),
-        None if system_filter is None else id(system_filter),
+        system_filter,  # the object, not its id: an id is reused once a filter is freed
     )
 
     cached = _JANA_CONTEXT_CACHE.get(key)
@@ -1481,7 +1481,7 @@ def compute_doi(weighted_log_jacobian, thicknesses, threshold=0.8,
     }
 
 
-def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
+def invert_joint(fit_systems, thicknesses, rho_start, t_step=None, tx_size=None, geometry=None,
                  rx_x=0.0, rx_y=0.0, rho_min=0.1, rho_max=1e5,
                  alpha_steps=5, alpha_step=1 / 9, maxit=15, n_quad=5,
                  use_numba=True, use_cuda=False, transform='dlf', verbose=True,
@@ -1511,6 +1511,11 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
         'M'     : (n_gates, n_step) gate-averaging matrix for this dataset
         'obs'   : (n_gates,) observed data, positive
         'noise' : (n_gates,) absolute noise standard deviation
+        Other data sharing the model (e.g. VES, ``ves.fit_system``) replace
+        'M' with 'forward' (ln rho -> predicted data) and 'jacobian'
+        (ln rho -> d data / d ln rho); TEM arguments (``t_step``,
+        ``tx_size``, ``geometry``) are then needed only if TEM systems are
+        given too, and the DOI is computed from the TEM systems.
     thicknesses : (N-1,) layer thicknesses [m]
     rho_start   : (N,) initial resistivities [Ohm.m]
     t_step      : (n_step,) shared step-response time grid used to build
@@ -1591,30 +1596,32 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
             or isinstance(doi_refinement, bool) or doi_refinement < 1):
         raise ValueError('doi_refinement must be a positive integer.')
     thicknesses = np.asarray(thicknesses, dtype=float)
-    t_step = np.asarray(t_step, dtype=float)
-    # Only evaluate step times with a nonzero weight in some gate: the padded
-    # ends of the shared grid usually fall outside every gate (exact).
-    used = np.any(np.vstack([np.asarray(f['M']) for f in fit_systems]) != 0, axis=0)
-    t_step = t_step[used]
-    fit_systems = [dict(f, M=np.asarray(f['M'])[:, used]) for f in fit_systems]
+    is_tem = [('M' in f) for f in fit_systems]
+    if any(is_tem):
+        t_step = np.asarray(t_step, dtype=float)
+        # Only evaluate step times with a nonzero weight in some gate: the padded
+        # ends of the shared grid usually fall outside every gate (exact).
+        used = np.any(np.vstack([np.asarray(f['M']) for f in fit_systems if 'M' in f]) != 0, axis=0)
+        t_step = t_step[used]
+        fit_systems = [dict(f, M=np.asarray(f['M'])[:, used]) if 'M' in f else f for f in fit_systems]
+        step, jacobian_step = _step_functions(thicknesses, t_step, tx_size, geometry, rx_x, rx_y, n_quad, use_numba,
+                                              use_cuda, transform, system_filter, kernel, tx_height, rx_height)
     observed = np.concatenate([np.asarray(f['obs'], dtype=float) for f in fit_systems])
     noise_abs = np.concatenate([np.asarray(f['noise'], dtype=float) for f in fit_systems])
     weights = observed / noise_abs
-
-    step, jacobian_step = _step_functions(thicknesses, t_step, tx_size, geometry, rx_x, rx_y, n_quad, use_numba,
-                                          use_cuda, transform, system_filter, kernel, tx_height, rx_height)
+    tem_rows = np.concatenate([np.full(len(f['obs']), tem) for f, tem in zip(fit_systems, is_tem)])
 
     def predict(log_rho):
-        response = step(log_rho)
-        return np.concatenate([f['M'] @ response for f in fit_systems])
+        response = step(log_rho) if any(is_tem) else None
+        return np.concatenate([f['M'] @ response if 'M' in f else f['forward'](log_rho) for f in fit_systems])
 
     def weighted_log_rms(pred):
         residual = np.log(observed) - np.log(np.maximum(pred, 1e-300))
         return np.sqrt(np.mean((weights * residual) ** 2)), residual
 
     def jacobian(log_rho, pred):
-        jac_abs = jacobian_step(log_rho)
-        gate_jac = np.vstack([f['M'] @ jac_abs for f in fit_systems])
+        jac_abs = jacobian_step(log_rho) if any(is_tem) else None
+        gate_jac = np.vstack([f['M'] @ jac_abs if 'M' in f else f['jacobian'](log_rho) for f in fit_systems])
         result = np.zeros_like(gate_jac)
         positive = pred > 0
         result[positive] = gate_jac[positive] / pred[positive, None]
@@ -1687,11 +1694,12 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
     elif not valid_response:
         termination_reason = 'invalid_response'
     doi = None
-    if calc_doi:
-        invalid_predictions = int(np.count_nonzero(~np.isfinite(final_pred) | (final_pred <= 0)))
-        invalid_weights = int(np.count_nonzero(~np.isfinite(weights) | (weights <= 0)))
-        if final_pred.size == 0 or invalid_predictions or invalid_weights:
-            reason = (f'DOI unavailable: {final_pred.size} gates, '
+    if calc_doi and any(is_tem):  # from the TEM systems
+        tem_pred, tem_weights = final_pred[tem_rows], weights[tem_rows]
+        invalid_predictions = int(np.count_nonzero(~np.isfinite(tem_pred) | (tem_pred <= 0)))
+        invalid_weights = int(np.count_nonzero(~np.isfinite(tem_weights) | (tem_weights <= 0)))
+        if tem_pred.size == 0 or invalid_predictions or invalid_weights:
+            reason = (f'DOI unavailable: {tem_pred.size} gates, '
                       f'{invalid_predictions} nonfinite/nonpositive predictions, '
                       f'{invalid_weights} nonfinite/nonpositive data weights.')
             doi = {
@@ -1716,11 +1724,11 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step, tx_size, geometry,
                 use_cuda=use_cuda, transform=transform,
                 jacobian_mode='absolute', system_filter=system_filter, kernel=kernel,
                 tx_height=tx_height, rx_height=rx_height)
-            doi_gate_jac = np.vstack([f['M'] @ doi_jac_abs for f in fit_systems])
+            doi_gate_jac = np.vstack([f['M'] @ doi_jac_abs for f in fit_systems if 'M' in f])
             doi_jac = np.zeros_like(doi_gate_jac)
-            positive = final_pred > 0
-            doi_jac[positive] = doi_gate_jac[positive] / final_pred[positive, None]
-            doi = compute_doi(doi_jac * weights[:, None], doi_thicknesses,
+            positive = tem_pred > 0
+            doi_jac[positive] = doi_gate_jac[positive] / tem_pred[positive, None]
+            doi = compute_doi(doi_jac * tem_weights[:, None], doi_thicknesses,
                               threshold=doi_threshold,
                               conservative_threshold=doi_conservative_threshold)
             doi['refinement'] = doi_refinement

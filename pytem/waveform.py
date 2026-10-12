@@ -272,6 +272,40 @@ def convolve_waveform(step_times, step_response, waveform_times,
 # Interpolation kernel: the compactly-supported quintic B-spline,
 # phi(x) = 0 for |x| > 2.
 
+def primary_response(primary, gate_open, gate_close, waveform_times, waveform_currents, f_cut=None, order=1):
+    """
+    The primary field in each gate of a receiver that sees it (a coil outside the loop, as in Loupe).
+
+    The forward functions give the response of the ground only. A receiver low-pass also drags the primary
+    dB/dt of the turn-off into the gates that follow; the modelled response is then ground + primary.
+    The primary dB/dt is ``field * dI/dt`` on every segment of the piecewise-linear waveform; it is passed
+    through the low-pass (Butterworth, order 1 or 2, cut-off ``f_cut`` [Hz]; None for no filter) and averaged
+    over each gate.
+
+    primary : magnitude of the primary dB/dt during the last ramp (the turn-off), scalar or (n,)
+    Returns (gates,) or (n, gates), in the units of ``primary`` and negative after a turn-off, where the
+    late ground response is positive.
+    """
+    t, a = np.asarray(waveform_times, dtype=float), np.asarray(waveform_currents, dtype=float)
+    gate_open, gate_close = np.asarray(gate_open, dtype=float), np.asarray(gate_close, dtype=float)
+    slope = np.diff(a) / np.diff(t)
+    omega = 2 * np.pi * f_cut if f_cut else 0.0
+
+    def ramp(x):
+        "Integral of the low-pass step response from 0 to x."
+        x = np.maximum(x, 0.0)
+        if not omega:
+            return x
+        if order == 2:
+            b = omega / np.sqrt(2)
+            return x - (1 - np.exp(-b * x) * np.cos(b * x)) / b
+        return x - (1 - np.exp(-omega * x)) / omega
+
+    o, c = gate_open[:, None], gate_close[:, None]
+    shape = ((ramp(c - t[:-1]) - ramp(o - t[:-1]) - ramp(c - t[1:]) + ramp(o - t[1:])) * slope).sum(axis=1) / (gate_close - gate_open)
+    return np.multiply.outer(np.abs(primary) / abs(slope[-1]), shape)
+
+
 def _quintic_b_spline_S1(x):
     return 1 - (9 / 4) * x ** 2 * (1 - (2 / 9) * x * (1 + (5 / 2) * x * (1 - (2 / 5) * x)))
 

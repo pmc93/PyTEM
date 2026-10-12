@@ -28,7 +28,7 @@ if _APP_DIR not in sys.path:
 
 from pytem import fwd_circle_central
 from ves import forward as ves_forward
-from _shared import render_footer
+from _shared import render_footer, tem_sigma
 try:
     from _shared import is_mobile
 except ImportError:  # older deployed _shared.py without the helper
@@ -64,6 +64,10 @@ def _nearest_rho(value):
     return min(_RHO, key=lambda x: abs(x - value))
 
 
+_TEM_SEED = 18    # chosen so the true model gives wRMS ~ 1.00
+_VES_SEED = 151   # chosen so the true model gives wRMS ~ 1.00
+
+
 # ── Cached forward calls ──────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def _tem_fwd(h_t, rho_t, r, times_t):
@@ -78,9 +82,10 @@ def _ves_fwd(ab2_t, rho_t, h_t, filt):
 
 # ── Cached figure builders (rebuilt only when the model changes) ──────────────
 @st.cache_data(show_spinner=False)
-def _build_match_tem_fig(times_t, obs_t, pred_t, h1, rho1, rho2, mobile):
+def _build_match_tem_fig(times_t, obs_t, sig_t, pred_t, h1, rho1, rho2, mobile):
     times = np.asarray(times_t)
     obs_t = np.asarray(obs_t)
+    sig_t = np.asarray(sig_t)
     pred_t = np.asarray(pred_t)
 
     if mobile:
@@ -89,8 +94,9 @@ def _build_match_tem_fig(times_t, obs_t, pred_t, h1, rho1, rho2, mobile):
     else:
         fig = Figure(figsize=(14, 6))
         ax1, ax2 = fig.subplots(1, 2)
-    ax1.loglog(times, obs_t, "o", color="black", ms=5, label="Data", zorder=3)
     ax1.loglog(times, pred_t, "-", color="steelblue", lw=2, label="Your model", zorder=4)
+    ax1.errorbar(times, np.abs(obs_t), yerr=sig_t, fmt="o", color="black", ms=5,
+                 ecolor="gray", elinewidth=1, capsize=2, label="Data", zorder=3)
     ax1.set_xlabel("Time [s]")
     ax1.set_ylabel(r"|dB/dt| [V/m$^2$]")
     ax1.grid(True, which="both", ls="--", alpha=0.6)
@@ -108,9 +114,10 @@ def _build_match_tem_fig(times_t, obs_t, pred_t, h1, rho1, rho2, mobile):
 
 
 @st.cache_data(show_spinner=False)
-def _build_match_ves_fig(ab2_t, obs_v, pred_v, h1, rho1, rho2, mobile):
+def _build_match_ves_fig(ab2_t, obs_v, sig_v, pred_v, h1, rho1, rho2, mobile):
     ab2 = np.asarray(ab2_t)
     obs_v = np.asarray(obs_v)
+    sig_v = np.asarray(sig_v)
     pred_v = np.asarray(pred_v)
 
     if mobile:
@@ -119,8 +126,9 @@ def _build_match_ves_fig(ab2_t, obs_v, pred_v, h1, rho1, rho2, mobile):
     else:
         fig = Figure(figsize=(14, 6))
         ax1, ax2 = fig.subplots(1, 2)
-    ax1.loglog(ab2, obs_v, "o", color="black", ms=5, label="Data", zorder=3)
     ax1.loglog(ab2, pred_v, "-", color="darkorange", lw=2, label="Your model", zorder=4)
+    ax1.errorbar(ab2, obs_v, yerr=sig_v, fmt="o", color="black", ms=5,
+                 ecolor="gray", elinewidth=1, capsize=2, label="Data", zorder=3)
     ax1.set_xlabel("AB/2 [m]")
     ax1.set_ylabel("Apparent resistivity [Ohm.m]")
     ax1.grid(True, which="both", ls="--", alpha=0.6)
@@ -137,40 +145,40 @@ def _build_match_ves_fig(ab2_t, obs_v, pred_v, h1, rho1, rho2, mobile):
     return _fig_png(fig)
 
 
-# ── Target-data generators (hidden truth, no added noise) ─────────────────
+# ── Target-data generators (hidden truth plus one fixed noise realisation) ─
 @st.cache_data(show_spinner=False)
-def _tem_target(thick_t, rho_t, tx_r, times_t, b_coeff):
-    times = np.array(times_t)
+def _tem_target(thick_t, rho_t, tx_r, times_t, b_coeff, rel_frac):
     clean = _tem_fwd(tuple(thick_t), tuple(rho_t), tx_r, times_t)
-    sigma = b_coeff * times ** (-0.5)
-    obs = clean
+    sigma = tem_sigma(times_t, b_coeff, rel_frac, clean)
+    # Fixed seed: the true model then scores wRMS ~ 1, as it would on real data
+    obs = clean + np.random.default_rng(_TEM_SEED).normal(size=len(clean)) * sigma
     return obs, sigma
 
 
 @st.cache_data(show_spinner=False)
 def _ves_target(thick_t, rho_t, ab2_t, frac):
     clean = _ves_fwd(ab2_t, tuple(rho_t), tuple(thick_t), _VES_FILTER)
-    obs = clean
-    sigma = frac * obs
+    sigma = frac * clean
+    obs = clean + np.random.default_rng(_VES_SEED).normal(size=len(clean)) * sigma
     return obs, sigma
 
 
 def _rms(pred, obs, sigma):
-    """RMS misfit (0 = perfect match)."""
+    """Error-weighted RMS (wRMS): ~1 = fit within the data uncertainty (the best a model can do)."""
     return float(np.sqrt(np.mean(((pred - obs) / sigma) ** 2)))
 
 
 def _fit_feedback(rms):
-    if rms < 0.01:
-        st.success(f"Perfect fit (RMS = {rms:.3f}). You found the true model.")
-    elif rms < 0.5:
-        st.success(f"Excellent fit (RMS = {rms:.2f}). Very close to the true model.")
+    if rms < 0.8:
+        st.warning(f"wRMS = {rms:.2f} is below 1: the model is fitting the noise, not just the signal.")
+    elif rms <= 1.1:
+        st.success(f"Fitted within the noise (wRMS = {rms:.2f}). The curve deviates from the data by about one standard deviation, which is what noise alone produces.")
     elif rms < 2.0:
-        st.info(f"Good fit (RMS = {rms:.2f}). Fine-tune the sliders to improve further.")
-    elif rms < 8.0:
-        st.warning(f"Getting closer (RMS = {rms:.2f}). Which part of the curve still misses the data?")
+        st.info(f"Not yet within the noise (wRMS = {rms:.2f}). Fine-tune the sliders to bring it down to about 1.")
+    elif rms < 5.0:
+        st.warning(f"Getting closer (wRMS = {rms:.2f}). Which part of the curve still misses the data?")
     else:
-        st.error(f"Still far off (RMS = {rms:.2f}). Try changing one parameter at a time.")
+        st.error(f"Still far off (wRMS = {rms:.2f}). Try changing one parameter at a time.")
 
 
 # ── Page header ───────────────────────────────────────────────────────────────
@@ -198,20 +206,30 @@ st.markdown(
     "also reveals why several different models can fit the same data (**non-uniqueness**)."
 )
 
-with st.expander("What is the RMS misfit?", expanded=False):
+with st.expander("What is the (weighted) RMS misfit?", expanded=False):
     st.markdown(
         r"""
         The **RMS misfit** measures how far your predicted curve is from the data
-        on average, expressed as a fraction of the data values:
+        on average, in units of the **data uncertainty** $\sigma_i$ (an
+        *error-weighted* RMS, wRMS):
 
         $$
         \mathrm{RMS} = \sqrt{\frac{1}{N}\sum_{i=1}^{N}
-        \left(\frac{d_i^{\text{pred}} - d_i^{\text{obs}}}{d_i^{\text{obs}}}\right)^2 }
+        \left(\frac{d_i^{\text{pred}} - d_i^{\text{obs}}}{\sigma_i}\right)^2 }
         $$
 
-        - **RMS = 0** means a perfect match.
-        - **RMS < 0.05** is a very good fit.
-        - **RMS ≫ 1** means the model is missing real structure in the data.
+        - **wRMS ≈ 1** means the data are **fitted within the noise**: the curve deviates
+          from the data by about one standard deviation on average, which is what noise
+          alone produces. This is the same target the inversion aims for.
+        - **wRMS > 1** means the data are not yet fitted within the noise, and **wRMS ≫ 1**
+          means the model is missing real structure in the data.
+        - **wRMS ≪ 1** would mean the model is fitting the noise. Like field data, the
+          data here contain noise, so even the true model does not reach 0.
+
+        The uncertainties used here are: for **TEM**, an absolute noise floor of
+        $3\times10^{-11}\,t^{-1/2}$ V/m² combined with a 3 % relative error; for
+        **VES**, a 5 % relative error. See the *Noise & Uncertainty* page for how
+        $\sigma$ is defined.
         """
     )
 
@@ -226,13 +244,12 @@ with tab_tem:
     tx_side = 40.0
     tx_r = float(np.sqrt(tx_side ** 2 / np.pi))
     times = np.logspace(-5.0, -2.0, 25)
-    _b = 3e-11  # TEM noise-floor coefficient
 
     # Hidden true model (a layer over a half-space)
     _TEM_TRUE = dict(h1=30.0, rho1=10.0, rho2=100.0)
     obs_t, sig_t = _tem_target((_TEM_TRUE["h1"],),
                                (_TEM_TRUE["rho1"], _TEM_TRUE["rho2"]),
-                               tx_r, tuple(times.tolist()), _b)
+                               tx_r, tuple(times.tolist()), 3e-11, 0.03)
 
     st.info(
         "**Hint:** work from shallow to deep. The **early-time** signal is set by the "
@@ -262,12 +279,12 @@ with tab_tem:
         pred_t = _tem_fwd((h1,), (rho1, rho2), tx_r, tuple(times.tolist()))
         rms_t = _rms(pred_t, obs_t, sig_t)
 
-        st.metric("RMS misfit", f"{rms_t:.3f}", help="0 = perfect match; lower is better.")
+        st.metric("wRMS misfit", f"{rms_t:.3f}", help="Error-weighted RMS: about 1 means the data are fitted within the noise; larger means a poorer fit.")
         _fit_feedback(rms_t)
 
         fig = _build_match_tem_fig(
             tuple(times.tolist()), tuple(np.asarray(obs_t).tolist()),
-            tuple(np.asarray(pred_t).tolist()), h1, rho1, rho2,
+            tuple(np.asarray(sig_t).tolist()), tuple(np.asarray(pred_t).tolist()), h1, rho1, rho2,
             is_mobile(),
         )
         st.image(fig, use_container_width=True)
@@ -275,7 +292,8 @@ with tab_tem:
         with st.expander("Reveal the hidden true model"):
             st.markdown(
                 f"""
-                The data were generated from:
+                The data were generated from the model below, plus noise
+                (so the true model scores wRMS ≈ 1):
 
                 - **Layer 1:** rho = {_TEM_TRUE['rho1']:.0f} Ohm.m, thickness = {_TEM_TRUE['h1']:.0f} m
                 - **Half-space:** rho = {_TEM_TRUE['rho2']:.0f} Ohm.m
@@ -296,12 +314,10 @@ with tab_ves:
                  divider="orange")
 
     ab2 = np.logspace(0, np.log10(300), 25)
-    _frac = 0.05  # 5% relative error
-
     _VES_TRUE = dict(h1=20.0, rho1=300.0, rho2=50.0)
     obs_v, sig_v = _ves_target((_VES_TRUE["h1"],),
                                (_VES_TRUE["rho1"], _VES_TRUE["rho2"]),
-                               tuple(ab2.tolist()), _frac)
+                               tuple(ab2.tolist()), 0.05)
 
     st.info(
         "**Hint:** work from shallow to deep. **Small AB/2** (left) is set by the top "
@@ -331,12 +347,12 @@ with tab_ves:
         pred_v = _ves_fwd(tuple(ab2.tolist()), (rho1, rho2), (h1,), _VES_FILTER)
         rms_v = _rms(pred_v, obs_v, sig_v)
 
-        st.metric("RMS misfit", f"{rms_v:.3f}", help="0 = perfect match; lower is better.")
+        st.metric("wRMS misfit", f"{rms_v:.3f}", help="Error-weighted RMS: about 1 means the data are fitted within the noise; larger means a poorer fit.")
         _fit_feedback(rms_v)
 
         fig = _build_match_ves_fig(
             tuple(ab2.tolist()), tuple(np.asarray(obs_v).tolist()),
-            tuple(np.asarray(pred_v).tolist()), h1, rho1, rho2,
+            tuple(np.asarray(sig_v).tolist()), tuple(np.asarray(pred_v).tolist()), h1, rho1, rho2,
             is_mobile(),
         )
         st.image(fig, use_container_width=True)
@@ -344,7 +360,8 @@ with tab_ves:
         with st.expander("Reveal the hidden true model"):
             st.markdown(
                 f"""
-                The data were generated from:
+                The data were generated from the model below, plus noise
+                (so the true model scores wRMS ≈ 1):
 
                 - **Layer 1:** rho = {_VES_TRUE['rho1']:.0f} Ohm.m, thickness = {_VES_TRUE['h1']:.0f} m
                 - **Half-space:** rho = {_VES_TRUE['rho2']:.0f} Ohm.m

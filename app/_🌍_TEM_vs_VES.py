@@ -246,6 +246,8 @@ st.markdown(
       transient decay (TEM) and apparent resistivity curve (VES) in real time.
     - 📊 **Jacobian & Sensitivity ▶️**: Explore which data points are sensitive to which
       layers; compare TEM and VES sensitivity side by side.
+    - 📡 **Noise & Uncertainty**: Sources of noise, the error model σ, SNR, and the
+      error-weighted misfit (wRMS) used by the inversion.
     - 🎯 **Inversion ▶️**: Run a synthetic inversion for TEM and VES
       and inspect how well each recovers the true model.
     - 👉 **About**: References and acknowledgements.

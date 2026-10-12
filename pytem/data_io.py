@@ -618,17 +618,14 @@ def read_xyz(path: str):
 
 
 @dataclass
-class TunoeTEMData(_PositionMixin):
-    """Container for a set of parsed TEMcompany `.usf` sounding files (one per station).
+class TEMSurveyData(_PositionMixin):
+    """Generic station-by-gate TEM survey container.
 
-    Usage
-    -----
-        tem = read_usf(r"...\\USF_Files_Tunoe")
-        tem.gate_times["HM"]["center"]        # -> np.ndarray [s]
-        tem.data                              # -> pandas DataFrame, one row per sounding
-
-        surv = Survey(tem)
-        surv.plot_soundings(); surv.plot_map()
+    Each row is a sounding. Gate groups use uppercase keys in ``gate_times``
+    with a ``center`` array in seconds and matching ``{group}gate001`` data
+    columns. Optional fractional uncertainties use ``{group}std001`` columns.
+    Readings retain the input units; no instrument-specific scaling is applied.
+    Position columns are ``E``/``N`` or ``Longitude``/``Latitude``, plus ``Line``.
     """
 
     meta: dict = field(default_factory=dict)
@@ -637,14 +634,14 @@ class TunoeTEMData(_PositionMixin):
     data: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def dbdt(self, moment: str) -> np.ndarray:
-        """Station x gate dB/dt matrix [V/(A*m^2)] for 'LM' or 'HM'."""
+        """Station x gate dB/dt matrix for a gate group, in the input units."""
         m = moment.upper()
         n = len(self.gate_times[m]["center"])
         cols = [f"{m}gate{i:03d}" for i in range(1, n + 1)]
         return self.data[cols].to_numpy(dtype=float)
 
     def dbdt_std(self, moment: str) -> np.ndarray:
-        """Station x gate fractional uncertainty (stack SEM / |mean|) for 'LM' or 'HM'."""
+        """Station x gate fractional uncertainty for a gate group."""
         m = moment.upper()
         n = len(self.gate_times[m]["center"])
         cols = [f"{m}std{i:03d}" for i in range(1, n + 1)]
@@ -663,6 +660,11 @@ class TunoeTEMData(_PositionMixin):
         with np.errstate(divide="ignore", invalid="ignore"):
             snr = np.abs(mean) / sem
         return t, mean, sem, snr
+
+
+@dataclass
+class TunoeTEMData(TEMSurveyData):
+    """Legacy TEMcompany container with USF-specific PyTEM conversion."""
 
     def to_pytem(self, moment: str, station=None, min_noise=0.03, peak_current=None):
         """
@@ -795,12 +797,25 @@ def _read_usf_sounding(path):
             ramp_time, ramp_amp = vals[0::2], vals[1::2]
         elif s.startswith("/CHANNEL:"):
             channel = int(s.split(":", 1)[1])
+        elif s.startswith("/COIL_LOCATION:"):  # walkTEM writes it per sweep, not in the header
+            meta.setdefault("coil_location", tuple(float(v) for v in s.split(":", 1)[1].split(",")))
         elif s.startswith("TIME,"):
             in_table = True
             time_list, gopen_list, gclose_list, volt_row = [], [], [], []
         elif in_table:
             if s.startswith("/END"):
                 in_table = False
+                if not gopen_list:
+                    centers = np.asarray(time_list, dtype=float)
+                    edges = np.empty(centers.size + 1)
+                    if np.all(centers > 0):
+                        edges[1:-1] = np.sqrt(centers[:-1] * centers[1:])
+                    else:
+                        edges[1:-1] = 0.5 * (centers[:-1] + centers[1:])
+                    edges[0] = centers[0] - (edges[1] - centers[0])
+                    edges[-1] = centers[-1] + (centers[-1] - edges[-2])
+                    gopen_list = edges[:-1].tolist()
+                    gclose_list = edges[1:].tolist()
                 ch = channels.setdefault(channel, {"time": time_list, "gate_open": gopen_list,
                                                      "gate_close": gclose_list, "volts": [],
                                                      "currents": [], "frequencies": [],
@@ -809,10 +824,12 @@ def _read_usf_sounding(path):
                 ch["currents"].append(current)
                 ch["frequencies"].append(frequency)
             elif s:
-                t, v, _err, _q, topen, tclose = (float(x) for x in s.split(","))
+                values = [float(x) for x in s.replace(",", " ").split()]  # comma- or space-separated (walkTEM: TIME, VOLTAGE QUALITY)
+                t, v = values[:2]
                 time_list.append(t)
-                gopen_list.append(topen)
-                gclose_list.append(tclose)
+                if len(values) >= 6:
+                    gopen_list.append(values[4])
+                    gclose_list.append(values[5])
                 volt_row.append(v)
     return meta, channels
 
@@ -839,7 +856,8 @@ def _read_usf_notes(folder) -> dict:
     return notes
 
 
-def read_usf(folder: str, max_soundings: int | None = None) -> TunoeTEMData:
+def read_usf(folder: str, max_soundings: int | None = None,
+             pattern: str = "*.usf") -> TunoeTEMData:
     """
     Read every TEMcompany `.usf` sounding file in `folder` into one dataset.
 
@@ -863,16 +881,20 @@ def read_usf(folder: str, max_soundings: int | None = None) -> TunoeTEMData:
     max_soundings : int or None, default None
         Maximum number of sorted sounding files to read. ``None`` reads the
         full folder.
+    pattern : str, default "*.usf"
+        Filename glob used within ``folder``. For folders containing both
+        original and corrected files, use ``"*_Ifix.usf"`` to avoid loading
+        each sounding twice with incompatible gate layouts.
 
     Returns
     -------
     TunoeTEMData
     """
-    paths = sorted(Path(folder).glob("*.usf"))
+    paths = sorted(Path(folder).glob(pattern))
     if max_soundings is not None:
         paths = paths[:max_soundings]
     if not paths:
-        raise ValueError(f"No .usf files found in {folder!r}")
+        raise ValueError(f"No files matching {pattern!r} found in {folder!r}")
 
     notes = _read_usf_notes(folder)
 
@@ -941,6 +963,29 @@ def read_usf(folder: str, max_soundings: int | None = None) -> TunoeTEMData:
     tem.gate_times = gate_times
     tem.waveforms = waveforms
     return tem
+
+
+def read_workbench_export(path: str | Path, usecols=None) -> tuple[pd.DataFrame, dict]:
+    """Read a whitespace-delimited Workbench DATA_/DATASTD_ export and header."""
+    header = []
+    with Path(path).open(encoding="utf-8", errors="replace") as stream:
+        for row_number, line in enumerate(stream):
+            body = line.lstrip("/").strip()
+            if body.startswith("LINE_NO") and "UTMX" in body:
+                columns = body.split()
+                skiprows = row_number + 1
+                break
+            header.append(body)
+        else:
+            raise ValueError(f"Workbench column header not found: {path}")
+    meta = {}
+    for name in ("DUMMY", "DATA UNIT", "COORDINATE SYSTEM", "NUMBER OF GATES", "GATE TIMES (s)"):
+        if name in header:
+            meta[name] = header[header.index(name) + 1]
+    table = pd.read_csv(path, sep=r"\s+", skiprows=skiprows, names=columns,
+                        usecols=usecols, dtype=float, comment="/")
+    table = table.replace(float(meta.get("DUMMY", 9999)), np.nan)
+    return table, meta
 
 
 def read_workbench_xyz(path: str, gex: str) -> TunoeTEMData:
@@ -1088,6 +1133,71 @@ def read_temcompany_xyz(path: str, lin: str | None = None) -> TunoeTEMData:
                                   columns=[f"{m}gate{g:03d}" for g in gates] + [f"{m}std{g:03d}" for g in gates] + [f"{m}current"]))
     tem.data = pd.concat(parts, axis=1).reset_index(drop=True)
     return tem
+
+
+def read_loupe_dat(path: str, turns: int = 13, sensor_delay: bool = True) -> dict:
+    """
+    Read Loupe data exported by dsQC as an "EMIT DAT" file (`.dat`): the vertical (Z) component of every reading.
+
+    Loupe is a slingram TEM system carried by two people: a small multi-turn loop and a 3-component coil about
+    10 m behind it, one reading per second. dB/dt [nV/Am^4] is multiplied by the area of one loop turn
+    (``TX_MOMENT / CURRENT / turns``) to get the area of one turn. ``CURRENT`` is a percentage of the
+    20 A transmitter rating (so ``CURRENT:100`` means 20 A, not 100 A). The exported channels are normalized
+    using the percentage value as if it were amperes; they are rescaled by 100 / 20 to give V/(A*m^2).
+
+    With ``sensor_delay`` the gates are moved earlier by the header's ``SENSORDELAY`` (the receiver lags the
+    transmitter): windows that then start before the end of the turn-off begin 0.1 us after it, and a gate
+    centred before it (gate 1) is marked not ``usable``. ``sensor_delay=False`` keeps the file's gate times.
+
+    Returns a dict:
+        meta       the KEY:value settings of the header (strings)
+        data       DataFrame, one row per reading: Line, the file's columns, and Distance (transmitter to receiver) [m]
+        times, gate_open, gate_close   gate centres and edges [s], counted from the end of the turn-off
+        usable     (gates,) False for a gate centred before the end of the turn-off
+        sensor_delay                   the shift applied to the gates [s]
+        tx_height, rx_height           loop 1.0 m and coil 1.7 m above the ground (the coil is carried at 1.6 to 1.8 m)
+        dbdt       (readings, gates) dB/dt [V/(A*m^2)]
+        primary    (readings,) |PRIMARY|, the primary dB/dt during the turn-off, in the same units
+        area, tx_radius                of one turn of the loop [m^2], [m]
+        waveform_times, waveform_currents   bipolar square wave, 50 % duty, linear ramps: the pulse that ends at 0 and the three before
+    """
+    lines = Path(path).read_text().splitlines()
+    if "EMIT DAT" not in lines[0]:
+        raise ValueError("Not an EMIT DAT (Loupe) file")
+    meta = dict(cell.split(":", 1) for cell in lines[1].split() if ":" in cell)
+    edges = {line[6]: _floats(line.split("=")[1].replace(",", " ")) * 1e-3 for line in lines if line.startswith("/TIMES")}
+    header = next(line for line in lines if line.startswith("FID")).split()
+    rows, line_no = [], 1
+    for line in lines:
+        if line.startswith("LINE:"):
+            line_no = int(line[5:])
+        elif line[:1].isdigit() and line.split()[header.index("C")] == "Z":
+            rows.append([line_no] + line.split()[:len(header)])
+    data = pd.DataFrame(rows, columns=["Line"] + header)
+    data = data.apply(lambda column: pd.to_numeric(column, errors="coerce") if column.name not in ("ACQ_TIME", "TIME", "GPS_TIME", "C") else column)
+    data["Distance"] = np.hypot(data["TX_EAST"] - data["RX_EAST"], data["TX_NORTH"] - data["RX_NORTH"])
+    gates = int(data["NCH"].iloc[0])
+    current_percent = float(meta["CURRENT"])
+    if current_percent <= 0:
+        raise ValueError(f"CURRENT must be a positive percentage, got {current_percent}")
+    tx_current = current_percent * 20.0 / 100.0
+    area = float(meta["TX_MOMENT"]) / current_percent / turns
+    scale = 1e-9 * area * current_percent / tx_current
+    frequency, ramp = float(meta["FREQ"]), float(meta["TURNOFF"]) * 1e-3
+    delay = float(meta.get("SENSORDELAY", 0.0)) * 1e-6 if sensor_delay else 0.0
+    gate_open, gate_close = edges["S"][:gates] - delay, edges["E"][:gates] - delay
+    centre = 0.5 * (gate_open + gate_close)
+    usable = centre > 0
+    gate_open = np.maximum(gate_open, 1e-7)
+    off = -np.arange(3, -1, -1) / (2 * frequency)            # ends of the four pulses
+    sign = np.array([-1.0, 1.0, -1.0, 1.0])
+    waveform_times = np.column_stack([off - 1 / (4 * frequency), off - 1 / (4 * frequency) + ramp, off - ramp, off]).ravel()
+    return {"meta": meta, "data": data, "gate_open": gate_open, "gate_close": gate_close,
+            "times": np.where(usable, centre, 0.5 * (gate_open + gate_close)), "usable": usable,
+            "sensor_delay": delay, "tx_height": 1.0, "rx_height": 1.7,
+            "dbdt": data[[f"CH{g:02d}" for g in range(1, gates + 1)]].to_numpy() * scale,
+            "primary": data["PRIMARY"].abs().to_numpy() * scale, "area": area, "tx_radius": np.sqrt(area / np.pi),
+            "waveform_times": waveform_times, "waveform_currents": np.column_stack([0 * sign, sign, sign, 0 * sign]).ravel()}
 
 
 def noise_model(times, data, current, noise_level, base=0.03):

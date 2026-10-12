@@ -405,7 +405,7 @@ _FWD_QUIZ = [
             "No visible change",
             "A drop below the reference",
         ],
-        "answer": "A clear rise above the 100 Ohm.m reference",
+        "answer": "A clear rise above the 100 Ohm.m reference model",
         "why": "Galvanic VES forces current through resistive layers, so a buried "
                "resistor lifts the apparent resistivity, where VES complements TEM.",
     },

@@ -246,7 +246,7 @@ def _filter_weights(system_filter, times, transform, f_base, e_eta, e_A):
     if system_filter is None:
         return None
     key = (
-        None if system_filter is None else id(system_filter),
+        system_filter,  # the object, not its id: an id is reused once a filter is freed
         transform,
         _arr_cache_key(times),
         None if f_base is None else _arr_cache_key(f_base),

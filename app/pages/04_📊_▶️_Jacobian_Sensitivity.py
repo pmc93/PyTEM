@@ -271,7 +271,7 @@ st.caption(
 st.divider()
 st.subheader(":violet[Try it yourself: explore the sensitivities]", divider="violet")
 st.markdown(
-    """
+    r"""
     Change the **shared earth model** sliders above and watch how the Jacobian and
     the layer-sensitivity bars respond. Flip between the 🧲 TEM and ⚡️ VES tabs to
     compare the two methods on the same earth.
@@ -284,11 +284,93 @@ st.markdown(
     3. **Push a layer deep.** Increase the thickness of the upper layers so a target
        sits deeper. Its sensitivity fades in both methods, the data lose leverage
        at depth.
-    4. **Make two layers alike.** Give two adjacent layers nearly the same
-       resistivity and watch their Jacobian columns look almost identical, the
-       fingerprint of equivalence (non-uniqueness).
+    4. **Equivalence: trade thickness against resistivity.** Use the equivalence
+       demo below: a conductive layer sandwiched between two resistive layers. Change
+       its thickness and resistivity together so that its conductance
+       $S = h/\rho$ stays constant, and compare the TEM responses. Despite
+       substantial differences in thickness and resistivity, the responses can remain
+       nearly identical: the data constrain $S$, not $h$ and $\rho$ separately.
     """
 )
+
+# -- Equivalence demo ----------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def _tem_resp(h_t, rho_t, tx_r, times_t):
+    return -fwd_circle_central(list(h_t), list(rho_t), tx_radius=tx_r, times=np.array(times_t))
+
+
+@st.cache_data(show_spinner=False)
+def _build_equiv_fig(times, resp_a, resp_b, resp_c, mobile):
+    times = np.asarray(times)
+    resp_a, resp_b, resp_c = (np.asarray(r) for r in (resp_a, resp_b, resp_c))
+    if mobile:
+        fig = Figure(figsize=(8, 10))
+        ax_d, ax_r = fig.subplots(2, 1)
+    else:
+        fig = Figure(figsize=(14, 5.5))
+        ax_d, ax_r = fig.subplots(1, 2)
+    fig.subplots_adjust(wspace=0.3, hspace=0.4)
+    ax_d.loglog(times, resp_a, "-", color="black", lw=3, label="Model A (reference)")
+    ax_d.loglog(times, resp_b, "--", color="tab:green", lw=2, label="Model B (same S)")
+    ax_d.loglog(times, resp_c, ":", color="tab:red", lw=2, label="Model C (S changed)")
+    ax_d.set_xlabel("Time [s]")
+    ax_d.set_ylabel(r"|dB/dt| [V/m$^2$]")
+    ax_d.set_title("TEM responses")
+    ax_d.grid(True, which="both", ls="--", alpha=0.4)
+    ax_d.legend()
+    ax_r.semilogx(times, 100 * (resp_b / resp_a - 1), "--", color="tab:green", lw=2, label="B vs A")
+    ax_r.semilogx(times, 100 * (resp_c / resp_a - 1), ":", color="tab:red", lw=2, label="C vs A")
+    ax_r.axhspan(-5, 5, color="gray", alpha=0.2, label="\u00b15 %")
+    ax_r.set_xlabel("Time [s]")
+    ax_r.set_ylabel("Difference to A [%]")
+    ax_r.set_title("Relative difference")
+    ax_r.grid(True, which="both", ls="--", alpha=0.4)
+    ax_r.legend()
+    return _fig_png(fig)
+
+
+st.markdown("**Equivalence demo: a conductor between two resistive layers**")
+st.markdown(
+    r"""
+    Three layers: a resistive top layer, a **conductive layer**, and a resistive
+    half-space. Model **A** is the reference. Model **B** scales the conductive layer's
+    thickness *and* resistivity by the same factor $k$, so $S = h/\rho$ is unchanged.
+    Model **C** scales only the resistivity by $k$ (so $S$ changes) for comparison.
+    """
+)
+col_e1, col_e2, col_e3 = st.columns(3)
+with col_e1:
+    h_ref = float(st.slider("Reference conductor thickness h [m]", 2, 20, 4, key="eq_h"))
+with col_e2:
+    rho_ref = float(st.select_slider("Reference conductor resistivity [Ohm.m]",
+                                     [1, 2, 3, 5, 10, 20], value=2, key="eq_rho"))
+with col_e3:
+    k = float(st.select_slider("Scale factor k", [0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0],
+                               value=2.0, key="eq_k"))
+
+_eq_top_h, _eq_top_rho, _eq_base = 40.0, 200.0, 1000.0
+_eq_times = tuple(np.logspace(-5, -2, 40).tolist())
+_resp_a = _tem_resp((_eq_top_h, h_ref), (_eq_top_rho, rho_ref, _eq_base), tx_r, _eq_times)
+_resp_b = _tem_resp((_eq_top_h, h_ref * k), (_eq_top_rho, rho_ref * k, _eq_base), tx_r, _eq_times)
+_resp_c = _tem_resp((_eq_top_h, h_ref), (_eq_top_rho, rho_ref * k, _eq_base), tx_r, _eq_times)
+
+_diff_b = float(np.max(np.abs(_resp_b / _resp_a - 1)) * 100)
+_diff_c = float(np.max(np.abs(_resp_c / _resp_a - 1)) * 100)
+m1, m2, m3 = st.columns(3)
+m1.metric(f"A: {h_ref:.0f} m, {rho_ref:g} Ohm.m", f"S = {h_ref / rho_ref:.2f} S")
+m2.metric(f"B: {h_ref * k:.0f} m, {rho_ref * k:g} Ohm.m", f"S = {h_ref / rho_ref:.2f} S")
+m3.metric(f"C: {h_ref:.0f} m, {rho_ref * k:g} Ohm.m", f"S = {h_ref / (rho_ref * k):.2f} S")
+st.image(_build_equiv_fig(_eq_times, tuple(_resp_a), tuple(_resp_b), tuple(_resp_c), is_mobile()),
+         use_container_width=True)
+st.caption(
+    f"Largest difference to A: model B (same S) {_diff_b:.1f} %, model C (S changed) {_diff_c:.1f} %. "
+    "Differences of about 5 % or less are comparable to typical data errors, so the data "
+    "cannot tell A and B apart, even though the thickness and resistivity differ by a factor "
+    "of $k$. The equivalence holds best for thin conductors; the larger $k$ "
+    "becomes, the more B drifts away from A. The dual statement for a resistive layer "
+    r"involves its transverse resistance $T = h\rho$, which VES constrains."
+)
+
 
 st.markdown("**Now check your understanding**")
 col1, col2 = st.columns(2)
@@ -343,17 +425,17 @@ with col4:
         st.error("Think about which method forces current through a resistor versus inducing it.")
 
 qe = st.radio(
-    ":red[**Two adjacent layers have nearly identical Jacobian columns. The inversion will most likely...**]",
-    ["Resolve both layers perfectly",
-     "Trade one layer off against the other (equivalence)",
-     "Diverge and fail",
-     "Ignore those data points"],
+    ":red[**A conductive layer's thickness and resistivity are both doubled, keeping S = h/rho constant. The TEM response will...**]",
+    ["Change dramatically",
+     "Stay nearly the same, so the data cannot separate h and rho (equivalence)",
+     "Disappear completely",
+     "Shift to later times only"],
     index=None, key="jac_q5",
 )
-if qe == "Trade one layer off against the other (equivalence)":
-    st.success("Correct! Collinear sensitivities mean the data cannot separate the two layers, the classic equivalence / non-uniqueness problem.")
+if qe == "Stay nearly the same, so the data cannot separate h and rho (equivalence)":
+    st.success("Correct! TEM mainly constrains the conductance S = h/rho of the conductor, so models with the same S fit the data about equally well: the classic equivalence / non-uniqueness problem.")
 elif qe is not None:
-    st.error("If two columns carry the same information, the data cannot tell the layers apart.")
+    st.error("Try the equivalence demo above: keep S = h/rho constant and compare the responses.")
 
 qf = st.radio(
     ":red[**A deep layer shows weak sensitivity in BOTH Jacobians. What should you expect?**]",

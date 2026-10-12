@@ -6,6 +6,7 @@ Edit the constants below in one place; they appear in the footer of every page.
 import datetime
 import re
 
+import numpy as np
 import streamlit as st
 
 # --- Edit these once; they propagate to every page footer --------------------
@@ -31,6 +32,17 @@ def is_mobile():
     except Exception:
         return False
     return bool(_MOBILE_UA.search(ua))
+
+
+def tem_sigma(times, b_coeff, rel_frac=0.0, data=None):
+    """TEM data uncertainty used for weighting: sigma_i = sqrt((b t_i^-1/2)^2 + (rel * |d_i|)^2).
+
+    With ``rel_frac = 0`` (or no ``data``) only the absolute noise floor is returned.
+    """
+    floor = b_coeff * np.asarray(times, dtype=float) ** -0.5
+    if data is None or rel_frac <= 0.0:
+        return floor
+    return np.sqrt(floor ** 2 + (rel_frac * np.abs(np.asarray(data, dtype=float))) ** 2)
 
 
 def render_footer():

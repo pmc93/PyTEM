@@ -233,6 +233,8 @@ result = pytem.invert_sci(
 
 **Field data and errors (`data_io.py`):** `read_workbench_xyz(path, gex)` reads an Aarhus Workbench processed tTEM export with its `.gex` (waveforms, gate times, loop, coil position, heights, filters). `read_temcompany_xyz(path, lin)` reads a raw TEMcompany stb2xyz file into the same container, one row per sounding (consecutive LM and HM records paired); with a `.lin` line file, records outside the lines are dropped and soundings are named by line. `noise_model()` gives relative STDs from a dB/dt noise level per moment, `sqrt(base² + (N / I · (t / 1 ms)^-½ / |d|)²)`, and `estimate_noise_level()` takes that level from the data's own STDs.
 
+**Loupe (`data_io.py`, `waveform.py`):** `read_loupe_dat(path)` reads the vertical component of a dsQC "EMIT DAT" export: dB/dt per reading in V/(A·m²), `PRIMARY`, the transmitter-receiver distance of each reading, the gates moved earlier by `SENSORDELAY` (gate 1 then marked not usable; `sensor_delay=False` keeps the file's times), loop and coil heights of 1.0 and 1.7 m, and a 50 % duty waveform built from `FREQ` and `TURNOFF`. `CURRENT` is read as a percentage of the 20 A transmitter, so the data are rescaled by 100 / 20. `primary_response(primary, gate_open, gate_close, waveform_times, waveform_currents, f_cut, order)` gives the primary field as a receiver low-pass drags it into each gate. `notebooks/15. pytem_loupe.ipynb` tests every assumption on one line of data.
+
 ---
 
 ### `ip_models.py`
