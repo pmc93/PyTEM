@@ -33,19 +33,16 @@ def _clean_decay(times_t, tx_r):
 
 
 @st.cache_data(show_spinner=False)
-def _build_noise_fig(times_t, clean_t, sigma_floor_t, sigma_tot_t, noisy_t, mobile):
+def _build_noise_fig(times_t, clean_t, sigma_floor_t, noisy_t, mobile):
     times = np.asarray(times_t)
     clean = np.asarray(clean_t)
     floor = np.asarray(sigma_floor_t)
-    total = np.asarray(sigma_tot_t)
     noisy = np.asarray(noisy_t)
     fig = Figure(figsize=(8, 6) if mobile else (11, 6), constrained_layout=True)
     ax = fig.subplots()
     ax.loglog(times, clean, "-", color="steelblue", lw=2, label="Noise-free signal")
     ax.loglog(times, np.abs(noisy), "o", color="black", ms=4, label="Noisy data (|d|)")
     ax.loglog(times, floor, "--", color="black", lw=1.5, label=r"Noise floor $b\,t^{-1/2}$")
-    ax.loglog(times, 3.0 * floor, ":", color="0.45", lw=1.5, label="SNR = 3")
-    ax.loglog(times, total, "-", color="tab:red", lw=1.5, label=r"Total $\sigma$ (floor + relative)")
     ax.set_xlabel("Time [s]")
     ax.set_ylabel(r"|dB/dt| [V/m$^2$]")
     ax.set_title("Signal, noise and uncertainty")
@@ -142,11 +139,10 @@ st.markdown(
 )
 
 # ------------------------------------------------------------------------------
-st.subheader(":red-background[4. Try it: noise floor and relative error]", divider="red")
-col_a, col_b, col_c = st.columns(3)
+st.subheader(":red-background[4. Try it: the noise floor]", divider="red")
+col_a, col_c = st.columns(2)
 log_b = col_a.slider("Noise floor log10(b)", -13.0, -9.0, -11.5, 0.25, key="nz_logb",
                      help=r"Absolute noise floor $\sigma = b\,t^{-1/2}$, with t in seconds.")
-rel_pct = col_b.slider("Relative error \u03b5 [%]", 0.0, 10.0, 3.0, 0.5, key="nz_rel")
 seed = int(col_c.number_input("Noise realisation (seed)", 0, 999, 42, key="nz_seed"))
 
 tx_r = float(np.sqrt(40.0 ** 2 / np.pi))
@@ -154,12 +150,11 @@ times = np.logspace(-5, -2, 30)
 clean = _clean_decay(tuple(times.tolist()), tx_r)
 b_coeff = 10.0 ** log_b
 floor = tem_sigma(times, b_coeff)
-total = tem_sigma(times, b_coeff, rel_pct / 100.0, clean)
 noisy = clean + np.random.default_rng(seed).normal(size=times.size) * floor
 
 st.image(
     _build_noise_fig(tuple(times.tolist()), tuple(clean.tolist()), tuple(floor.tolist()),
-                     tuple(total.tolist()), tuple(noisy.tolist()), is_mobile()),
+                     tuple(noisy.tolist()), is_mobile()),
     use_container_width=True,
 )
 _above = clean > 3.0 * floor
@@ -181,9 +176,9 @@ st.caption(
 st.subheader(":orange-background[5. Error-weighted misfit (wRMS)]", divider="orange")
 st.markdown(
     r"""
-    The misfit used on the *Match the Data* page and by the inversion is the
-    **error-weighted RMS (wRMS)**, in which every residual is divided by its
-    uncertainty:
+    The **inversion** pages use the **error-weighted RMS (wRMS)**, in which every
+    residual is divided by its uncertainty (the *Match the Data* exercise uses a
+    simpler relative RMS instead):
 
     $$
     \mathrm{wRMS} = \sqrt{\frac{1}{N}\sum_{i=1}^{N}
