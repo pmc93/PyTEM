@@ -272,7 +272,7 @@ class Survey:
                 source = provider if provider is not None else ctx.providers.OpenTopoMap
                 ctx.add_basemap(ax, crs=f'EPSG:{epsg}', source=source, zoom='auto',
                                 attribution=attribution)
-            except Exception as exc:
+            except Exception:
                 ax.set_facecolor('#e8e8e8')
                 ax.grid(True, ls=':', alpha=0.5)
         else:

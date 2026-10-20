@@ -10,8 +10,6 @@ import os
 import glob
 import sys
 
-import numpy as np
-
 from .transform_weights import (
     _HANKEL_BASE_201, _HANKEL_J0_201, _HANKEL_J1_201,
     _HANKEL_BASE_101, _HANKEL_J0_101, _HANKEL_J1_101,

@@ -414,7 +414,7 @@ class KenbecTEMData(_PositionMixin):
         --------------------
         The file stores dB/dt in V/(A*m^4), i.e. the response normalised by
         Tx moment [A*m^2] and Rx area [m^2].  pyTEM's fwd_square_offset with
-        ``current=1, rx_area=1`` returns dBz/dt in [T/s per A per m^2 Rx area].
+        ``current=1, rx_area=1`` returns dB/dt in [T/s per A per m^2 Rx area].
 
         To match the data units, the observed data (in V/(A*m^4)) is scaled
         up by A_tx * N_tx to give V/m^2 per ampere, and the waveform carries
@@ -423,8 +423,8 @@ class KenbecTEMData(_PositionMixin):
 
         unit derivation::
 
-            data [V/(A*m^4)] = dBz/dt [V/m^2] / (I * A_tx * N_tx)
-            obs_scaled = data * A_tx * N_tx = dBz/dt [V/m^2] / I_peak
+            data [V/(A*m^4)] = dB/dt [V/m^2] / (I * A_tx * N_tx)
+            obs_scaled = data * A_tx * N_tx = dB/dt [V/m^2] / I_peak
             wf_I = amplitude * I_peak  [A]
             -> model [V/m^2] / I_peak  matches  obs_scaled
 
@@ -477,7 +477,7 @@ class KenbecTEMData(_PositionMixin):
             peak_current = 1.0
 
         # ---- Unit conversion ------------------------------------------------
-        # Data: V/(A*m^4) = dBz/dt [V/m^2] / (I * A_tx * N_tx)
+        # Data: V/(A*m^4) = dB/dt [V/m^2] / (I * A_tx * N_tx)
         # obs = data * I_peak * A_tx * N_tx = dBdt_true [V/m^2]
         obs = np.abs(obs) * peak_current * tx_area * tx_turns  # [V/m^2]
 
@@ -675,12 +675,12 @@ class TunoeTEMData(TEMSurveyData):
         The `.usf` header declares ``VOLTAGE_UNITS: V/AM2``: the stored
         dB/dt is the raw receiver voltage already normalised by the Tx
         current alone (the Rx effective area is an instrument calibration
-        folded in beforehand), i.e. ``data [V/(A*m^2)] = dBz/dt [V/m^2] /
+        folded in beforehand), i.e. ``data [V/(A*m^2)] = dB/dt [V/m^2] /
         I``. This is the simplest reading of the header and has *not* been
         cross-checked against an independent calibration source -- treat
         absolute recovered resistivities with that caveat.
 
-            obs_scaled = data * I_peak = dBz/dt_true [V/m^2]
+            obs_scaled = data * I_peak = dB/dt_true [V/m^2]
             wf_I = amplitude * I_peak * N_tx           [A-turns]
 
         Parameters

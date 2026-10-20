@@ -1,5 +1,5 @@
 """
-VES (Vertical Electrical Sounding) — 1-D DC resistivity modelling and inversion.
+VES (Vertical Electrical Sounding), 1-D DC resistivity modelling and inversion.
 
 Public API
 ----------
@@ -10,7 +10,6 @@ fit_system(ab2, rhoap_obs, thicknesses, noise=0.03)        -> dict for pytem.inv
 """
 
 import numpy as np
-from numpy.linalg import inv, svd as _svd
 
 # ── Guptasarma & Singh (1997) linear filter coefficients ─────────────────────
 # Keys: 'gs7', 'gs11', 'gs22'  (also accept old 'guptasarma_N' names)
@@ -53,7 +52,7 @@ def _get_filter(filter_set):
 
 def _dc_recursion(lam, rho, h):
     """
-    DC Wait upward recursion for wavenumber *lam*.
+    DC upward recursion for wavenumber *lam*.
 
     Returns
     -------
@@ -161,7 +160,7 @@ def jacobian(ab2, resistivities, thicknesses, filter_set="gs7"):
 
     The model vector is [rho_1, ..., rho_N, h_1, ..., h_{N-1}] (length 2N-1).
     Derivatives are computed via closed-form differentiation through the DC
-    Wait recursion — no finite differences required.
+    upward recursion, no finite differences required.
 
     Parameters
     ----------

@@ -20,7 +20,7 @@ pyTEM computes the vertical dB/dt step-off response of a 1-D horizontally layere
 ```
 pytem/
 ├── transform_weights.py  # DLF coefficients and Euler weights (static data)
-├── recursion.py          # TE reflection coefficient — NumPy reference
+├── recursion.py          # TE reflection coefficient, NumPy reference
 ├── backends.py           # CUDA/CuPy detection; GPU transform weight arrays
 ├── kernels_numba.py      # Numba JIT forward kernels
 ├── kernels_gpu.py        # CuPy GPU forward kernels
@@ -40,7 +40,7 @@ pytem/
 ## Module descriptions
 
 ### `transform_weights.py`
-Pure data module — no computation. Stores the pre-optimised Digital Linear Filter (DLF) coefficients from Key (2009, 2012) and the Euler–Stehfest acceleration weights:
+Pure data module, no computation. Stores the pre-optimised Digital Linear Filter (DLF) coefficients from Key (2009, 2012) and the Euler–Stehfest acceleration weights:
 
 | Registry key | Points | Use |
 |---|---|---|
@@ -72,10 +72,10 @@ Exports: `HAS_CUDA`
 ### `kernels_numba.py`
 Numba `@njit`-compiled scalar kernels for the TEM forward model. One kernel per geometry × transform combination:
 
-- `_tem_circular_jit` — circular loop, Fourier DLF
-- `_tem_circular_euler_jit` — circular loop, Euler ILT
-- `_tem_square_jit` — square loop, Fourier DLF
-- `_tem_square_euler_jit` — square loop, Euler ILT
+- `_tem_circular_jit`: circular loop, Fourier DLF
+- `_tem_circular_euler_jit`: circular loop, Euler ILT
+- `_tem_square_jit`: square loop, Fourier DLF
+- `_tem_square_euler_jit`: square loop, Euler ILT
 
 All kernels accept a `filter_weights` array `(n_t, n_eval) complex128` for the system filter. The inner loop runs in prange over gate times for CPU parallelism.
 
@@ -89,7 +89,7 @@ CuPy (CUDA) equivalents of the Numba kernels. The full `(n_t, n_f, K)` tensor is
 ---
 
 ### `kernels_jacobian.py`
-Numba JIT and CuPy implementations of the **analytical Jacobian** kernels. Each uses the adjoint Wait recursion: one forward pass stores intermediate values, one backward pass accumulates `∂r_TE / ∂(ln ρ_j)` for all layers simultaneously, at the cost of a single forward call.
+Numba JIT and CuPy implementations of the **analytical Jacobian** kernels. Each uses the adjoint upward recursion: one forward pass stores intermediate values, one backward pass accumulates `∂r_TE / ∂(ln ρ_j)` for all layers simultaneously, at the cost of a single forward call.
 
 Same set of geometry × transform combinations as the forward kernels. All accept `filter_weights` so the system filter is automatically included in the gradient (since `H(ω)` is independent of resistivity).
 
@@ -176,7 +176,7 @@ $$\phi(\mathbf{m}) = \|\mathbf{W}(\ln \mathbf{d}_\text{obs} - \ln \mathbf{d}_\te
 
 | Function | Purpose |
 |---|---|
-| `getJ_ana` | Analytical Jacobian via adjoint Wait recursion |
+| `getJ_ana` | Analytical Jacobian via adjoint upward recursion |
 | `getJ_fd` | Finite-difference Jacobian (N+1 forward calls) |
 | `getR` | First-order roughness matrix with damping |
 | `getRMS` | Noise-normalised RMS misfit |
@@ -271,7 +271,7 @@ All functions accept an optional `ax` argument to plot into an existing axes.
 resistivities + thicknesses
         │
         ▼
-   recursion.py          ← Wait recursion (TE reflection coeff)
+   recursion.py          ← upward recursion (TE reflection coeff)
         │
         ▼
    forward.py            ← Hankel + Fourier/Euler DLF transforms

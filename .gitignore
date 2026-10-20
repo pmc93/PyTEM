@@ -29,9 +29,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# Large offline data
-notebooks/offline_files/
-
-# streamlit reviews
-app/reviews/
-presentation/
+# Local-only files (not synced to GitHub)
+_local/
+desktop.ini
+*.nbc
+*.nbi

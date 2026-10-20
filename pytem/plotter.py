@@ -100,12 +100,10 @@ def plot_survey_models(thicknesses, resistivity_models, rms=None, doi=None,
     if line_indices is not None and len(line_indices) != n_stations:
         raise ValueError('line_indices must have one value per station.')
 
-    doi_values = doi_capped = None
+    doi_values = None
     if doi is not None:
         if isinstance(doi, dict):
             doi_values = np.asarray(doi.get('standard'), dtype=float)
-            doi_capped = np.asarray(doi.get('standard_capped',
-                                             np.zeros(n_stations, dtype=bool)), dtype=bool)
         else:
             doi_values = np.asarray(doi, dtype=float)
         if doi_values.shape != (n_stations,):

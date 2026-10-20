@@ -30,7 +30,6 @@ from .forward import (fwd_circle_central, fwd_square_central,
 
 if HAS_NUMBA:
     from .kernels_jacobian import (
-        _te_rte_grad_jit,
         _tem_circular_grad_jit, _tem_square_grad_jit,
         _tem_circular_grad_euler_jit, _tem_square_grad_euler_jit,
     )
@@ -38,7 +37,6 @@ if HAS_NUMBA:
 if HAS_CUDA:
     import cupy as cp
     from .kernels_jacobian import (
-        _te_reflection_coeff_grad_gpu,
         _tem_circular_grad_gpu, _tem_square_grad_gpu,
         _tem_circular_grad_euler_gpu, _tem_square_grad_euler_gpu,
     )
@@ -254,14 +252,6 @@ def _te_grad_batch(lam, omegas, thick, rho, xp):
 
     dr *= dG
     return r_TE, dr
-
-# ============================================================
-# Numba JIT kernels live in kernels_jacobian.py (imported above).
-# The functions imported are:
-#   _te_rte_grad_jit              - single-omega adjoint recursion
-#   _tem_circular_grad_jit/euler  - circle DLF / Euler (with filter_weights)
-#   _tem_square_grad_jit/euler    - square DLF / Euler (with filter_weights)
-# ============================================================
 
 def getJ_ana(thicknesses, log_resistivities, tx_size, times,
              geometry='circle_central',
@@ -1305,11 +1295,8 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
               f"(over {valid_rho.size}/{len(times)} valid gates)")
 
     # ---- Initial alpha heuristic ----
-    #print("Building initial Jacobian...")
-    t0 = _time_mod.time()
     J0 = _build_jacobian(m)
     d0 = _forward_response(m)
-    #print(f"  done ({_time_mod.time() - t0:.1f} s)")
 
     valid0  = (obs_data > 0) & (d0 > 0)
     res0    = np.zeros(len(obs_data))
@@ -1332,7 +1319,6 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
     # stabilisation level for the whole inversion.
     l1_beta_it    = l1_beta
 
-    t_loop = _time_mod.time()
     d_pred = d0  # reuse the forward response already computed above
 
     for it in range(maxit):
@@ -1347,7 +1333,6 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
         rms = np.sqrt(np.mean((w[valid] * res_log[valid]) ** 2))
         rms_history.append(rms)
 
-        elapsed = _time_mod.time() - t_loop
         print(f"Iteration {it + 1:>3d}:  RMS = {rms:.2f}")
 
         if rms <= 1.0:

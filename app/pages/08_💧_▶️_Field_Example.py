@@ -37,13 +37,8 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from pytem import fwd_circle_central, invert as tem_invert
-from ves import forward as ves_forward, invert as ves_invert
-from _shared import render_footer
-try:
-    from _shared import is_mobile
-except ImportError:  # older deployed _shared.py without the helper
-    def is_mobile():
-        return False
+from ves import invert as ves_invert
+from _shared import is_mobile, render_footer
 
 
 def _fig_png(fig):

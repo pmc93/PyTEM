@@ -28,12 +28,7 @@ if _APP_DIR not in sys.path:
 
 from pytem import fwd_circle_central
 from ves import forward as ves_forward
-from _shared import render_footer
-try:
-    from _shared import is_mobile
-except ImportError:  # older deployed _shared.py without the helper
-    def is_mobile():
-        return False
+from _shared import is_mobile, render_footer
 
 
 def _fig_png(fig):
