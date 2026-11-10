@@ -3,7 +3,7 @@ survey.py - Quick-look plots for TEM field surveys: soundings, transects
 and station maps.
 
 Wraps a parsed :class:`~pytem.data_io.TEMData` /
-:class:`~pytem.data_io.KenbecTEMData` object (see :mod:`pytem.data_io`).
+:class:`~pytem.data_io.TEMSurveyData` object (see :mod:`pytem.data_io`).
 
 LM and HM are always plotted as separate curves and never summed or
 concatenated into one "combined" decay curve: each moment has its own
@@ -29,7 +29,7 @@ class Survey:
 
     Parameters
     ----------
-    tem : pytem.data_io.TEMData or pytem.data_io.KenbecTEMData
+    tem : pytem.data_io.TEMData or pytem.data_io.TEMSurveyData
         Typically the result of ``pytem.data_io.read_xyz(path)``.
     """
 

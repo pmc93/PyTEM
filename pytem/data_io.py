@@ -8,7 +8,6 @@ so :mod:`pytem.survey` can plot either without caring which instrument
 produced the file:
 
   * TEM Data Manager (TEM2Go / tTEM) exports -> ``read_tem_xyz()``  -> TEMData
-  * TEMImage-Beta station-stacked exports     -> ``read_kenbec_xyz()`` -> KenbecTEMData
   * Aarhus Workbench processed exports + .gex -> ``read_workbench_xyz()`` -> TunoeTEMData
   * raw TEMcompany stb2xyz files + .lin       -> ``read_temcompany_xyz()`` -> TunoeTEMData (one row per sounding)
 
@@ -40,7 +39,7 @@ def _floats(text: str) -> np.ndarray:
 class _PositionMixin:
     """Line grouping, UTM projection and along-line distance for station data.
 
-    Shared by :class:`TEMData` and :class:`KenbecTEMData`. Requires a
+    Shared by :class:`TEMData` and :class:`TEMSurveyData`. Requires a
     ``data`` DataFrame attribute; ``Line`` is optional (falls back to a
     single line ``"1"``), ``Longitude``/``Latitude`` are required the first
     time :meth:`utm_coords` is called unless ``E``/``N`` columns already
@@ -343,278 +342,9 @@ def read_tem_xyz(path: str) -> TEMData:
     return tem
 
 
-@dataclass
-class KenbecTEMData(_PositionMixin):
-    """Container for a parsed TEMImage_Beta `.xyz` station file.
-
-    Usage
-    -----
-        tem = read_kenbec_xyz(r"C:\\...\\kenbec_project_StationData.xyz")
-        tem.gate_times["HM"]["center"]        # -> np.ndarray [s]
-        tem.waveforms["LM"]["time"]           # -> np.ndarray [s]
-        tem.waveforms["LM"]["amplitude"]      # -> 0-1 normalised
-        tem.data                              # -> pandas DataFrame, one row per station
-
-        kw = tem.to_pytem("HM")              # ready for pytem.invert / fwd_square_offset
-    """
-
-    meta: dict = field(default_factory=dict)
-    waveforms: dict = field(default_factory=dict)   # {"LM": {"time":.., "amplitude":..}, "HM": {...}}
-    gate_times: dict = field(default_factory=dict)   # {"LM": {"open":.., "center":.., "close":..}, "HM": {..}}
-    data: pd.DataFrame = field(default_factory=pd.DataFrame)
-
-    # ---------- convenience accessors ----------
-
-    def dbdt(self, moment: str) -> np.ndarray:
-        """Station x gate dB/dt matrix [V/(A*m^4)] for 'LM' or 'HM'.
-
-        Dummy values (99999) are replaced with NaN.
-        """
-        m = moment.upper()
-        n = len(self.gate_times[m]["center"])
-        prefix = "LMgate" if m == "LM" else "HMgate"
-        cols = [f"{prefix}{i:03d}" for i in range(1, n + 1)]
-        arr = self.data[cols].to_numpy(dtype=float)
-        arr[arr == 99999.0] = np.nan
-        return arr
-
-    def dbdt_std(self, moment: str) -> np.ndarray:
-        """Station x gate fractional uncertainty for 'LM' or 'HM'.
-
-        Dummy values (99999) are replaced with NaN.
-        """
-        m = moment.upper()
-        n = len(self.gate_times[m]["center"])
-        prefix = "LMstd" if m == "LM" else "HMstd"
-        cols = [f"{prefix}{i:03d}" for i in range(1, n + 1)]
-        arr = self.data[cols].to_numpy(dtype=float)
-        arr[arr == 99999.0] = np.nan
-        return arr
-
-    def snr(self, moment: str):
-        """Per-gate SNR from the scatter across stations.
-
-        Returns (times, mean, sem, snr).
-        """
-        t = self.gate_times[moment.upper()]["center"]
-        d = self.dbdt(moment)
-        n_eff = np.sum(np.isfinite(d), axis=0)
-        mean = np.nanmean(d, axis=0)
-        sem = np.nanstd(d, axis=0) / np.sqrt(np.maximum(n_eff, 1))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            snr = np.abs(mean) / sem
-        return t, mean, sem, snr
-
-    def to_pytem(self, moment: str, station=None, min_noise=0.03,
-                peak_current=None):
-        """
-        Convert one moment ('LM' or 'HM') into kwargs for pyTEM.
-
-        Data unit conversion
-        --------------------
-        The file stores dB/dt in V/(A*m^4), i.e. the response normalised by
-        Tx moment [A*m^2] and Rx area [m^2].  pyTEM's fwd_square_offset with
-        ``current=1, rx_area=1`` returns dB/dt in [T/s per A per m^2 Rx area].
-
-        To match the data units, the observed data (in V/(A*m^4)) is scaled
-        up by A_tx * N_tx to give V/m^2 per ampere, and the waveform carries
-        just the current in Amperes.  Both sides then share the same 1/I_peak
-        factor which cancels in the log-space misfit.
-
-        unit derivation::
-
-            data [V/(A*m^4)] = dB/dt [V/m^2] / (I * A_tx * N_tx)
-            obs_scaled = data * A_tx * N_tx = dB/dt [V/m^2] / I_peak
-            wf_I = amplitude * I_peak  [A]
-            -> model [V/m^2] / I_peak  matches  obs_scaled
-
-        Parameters
-        ----------
-        moment     : 'LM' or 'HM'
-        station    : int index or None (stack mean over all stations)
-        min_noise  : fractional noise floor (default 0.03)
-        peak_current : override nominal current if known [A]
-
-        Returns
-        -------
-        dict  with keys: times, obs_data, noise_std, waveform_times,
-              waveform_currents, geometry, tx_size, rx_x, rx_y,
-              plus context keys: gate_open, gate_close, tx_turns,
-              tx_area, n_stations.
-        """
-        m = moment.upper()
-        gt = self.gate_times[m]
-        times = gt["center"]
-
-        dbdt = self.dbdt(m)
-        frac = self.dbdt_std(m)
-
-        if station is not None:
-            obs = dbdt[station]
-            noise_frac = frac[station]
-            n_stations = 1
-        else:
-            obs = np.nanmean(dbdt, axis=0)
-            n_eff = np.sum(np.isfinite(dbdt), axis=0)
-            sem = np.nanstd(dbdt, axis=0) / np.sqrt(np.maximum(n_eff, 1))
-            with np.errstate(divide="ignore", invalid="ignore"):
-                noise_frac = sem / np.abs(obs)
-            n_stations = int(self.data.shape[0])
-
-        noise_std = np.clip(np.nan_to_num(noise_frac, nan=min_noise), min_noise, None)
-
-        # ---- Geometry -------------------------------------------------------
-        tx_x = float(self.meta.get("LoopX", 3.0))
-        tx_y = float(self.meta.get("LoopY", 3.0))
-        tx_side = float(tx_x)                           # square loop side [m]
-        tx_area = float(self.meta.get("LoopArea", tx_x * tx_y))
-        tx_turns = int(float(self.meta.get("LoopTurns", 1)))
-        rx_x = float(self.meta.get("RXcoil_X_Position", -13.0))
-        rx_y = 0.0
-        geometry = "square_offset" if abs(rx_x) > 1e-6 else "square_central"
-
-        if peak_current is None:
-            peak_current = 1.0
-
-        # ---- Unit conversion ------------------------------------------------
-        # Data: V/(A*m^4) = dB/dt [V/m^2] / (I * A_tx * N_tx)
-        # obs = data * I_peak * A_tx * N_tx = dBdt_true [V/m^2]
-        obs = np.abs(obs) * peak_current * tx_area * tx_turns  # [V/m^2]
-
-        # Waveform: amplitude x (I_peak x N_tx) = total A-turns [A-turns]
-        # pyTEM models a single-turn loop; scaling wf_I by N_tx accounts for
-        # the actual number of transmitter turns.
-        wf_t = self.waveforms[m]["time"]
-        wf_I = self.waveforms[m]["amplitude"] * peak_current * tx_turns   # [A-turns]
-
-        return {
-            "times": times,
-            "obs_data": obs,
-            "noise_std": noise_std,
-            "waveform_times": wf_t,
-            "waveform_currents": wf_I,
-            "geometry": geometry,
-            "tx_size": tx_side,
-            "rx_x": rx_x,
-            "rx_y": rx_y,
-            # context
-            "gate_open": gt.get("open"),
-            "gate_close": gt.get("close"),
-            "tx_turns": tx_turns,
-            "tx_area": tx_area,
-            "n_stations": n_stations,
-        }
-
-
-def read_kenbec_xyz(path: str) -> KenbecTEMData:
-    """
-    Read a TEMImage_Beta station-stacked `.xyz` file.
-
-    Parameters
-    ----------
-    path : str
-
-    Returns
-    -------
-    KenbecTEMData
-    """
-    tem = KenbecTEMData()
-    tem.waveforms = {"LM": {}, "HM": {}}
-    tem.gate_times = {"LM": {}, "HM": {}}
-
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        lines = fh.readlines()
-
-    header_idx = None
-    for i, raw in enumerate(lines):
-        line = raw.strip()
-        if not line:
-            continue
-
-        if line.startswith("/"):
-            content = line[1:].strip()
-            if not content:
-                continue
-
-            # ---- key: value pairs ----------------------------------------
-            if ":" in content:
-                key, val = content.split(":", 1)
-                key, val = key.strip(), val.strip()
-
-                k_norm = key.replace(" ", "_").replace("(", "").replace(")", "")
-
-                # Waveforms
-                if "LM_WaveformTime" in k_norm:
-                    tem.waveforms["LM"]["time"] = _floats(val)
-                elif "LM_WaveformAmplitude" in k_norm:
-                    tem.waveforms["LM"]["amplitude"] = _floats(val)
-                elif "HM_WaveformTime" in k_norm:
-                    tem.waveforms["HM"]["time"] = _floats(val)
-                elif "HM_WaveformAmplitude" in k_norm:
-                    tem.waveforms["HM"]["amplitude"] = _floats(val)
-
-                # Gate times
-                elif "LM_GateOpenTime" in k_norm:
-                    tem.gate_times["LM"]["open"] = _floats(val)
-                elif "LM_GateCloseTime" in k_norm:
-                    tem.gate_times["LM"]["close"] = _floats(val)
-                elif "LM_GateCentreTime" in k_norm:
-                    tem.gate_times["LM"]["center"] = _floats(val)
-                elif "HM_GateOpenTime" in k_norm:
-                    tem.gate_times["HM"]["open"] = _floats(val)
-                elif "HM_GateCloseTime" in k_norm:
-                    tem.gate_times["HM"]["close"] = _floats(val)
-                elif "HM_GateCentreTime" in k_norm:
-                    tem.gate_times["HM"]["center"] = _floats(val)
-
-                else:
-                    tem.meta[k_norm] = val
-            else:
-                # Section header like "/[Geometry Info]" - skip
-                pass
-
-            # Data table header starts with "/Project ..."
-            if content.startswith("Project"):
-                header_idx = i
-                break
-        else:
-            # Non-comment line before the header - shouldn't happen but skip
-            pass
-
-    if header_idx is None:
-        raise ValueError(f"No data table header found in {path!r}")
-
-    columns = lines[header_idx].lstrip()[1:].split()   # strip leading whitespace then '/'
-
-    tem.data = pd.read_csv(
-        path,
-        skiprows=header_idx + 1,
-        sep=r"\s+",
-        names=columns,
-        na_values=["nan", "NaN"],
-        engine="python",
-        comment="/",
-    )
-
-    # Replace dummy value
-    tem.data.replace(99999, np.nan, inplace=True)
-
-    return tem
-
-
-def read_xyz(path: str):
-    """Auto-detect the `.xyz` format and dispatch to the matching reader.
-
-    TEMImage-Beta (Kenbec) exports use ``/`` comment/header lines; TEM Data
-    Manager exports use bare ``Key=Value`` lines. Returns a
-    :class:`KenbecTEMData` or :class:`TEMData` accordingly.
-    """
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for raw in fh:
-            line = raw.strip()
-            if line:
-                return read_kenbec_xyz(path) if line.startswith("/") else read_tem_xyz(path)
-    raise ValueError(f"Empty file: {path!r}")
+def read_xyz(path: str) -> TEMData:
+    """Compatibility alias for :func:`read_tem_xyz`."""
+    return read_tem_xyz(path)
 
 
 @dataclass
@@ -868,7 +598,7 @@ def read_usf(folder: str, max_soundings: int | None = None,
     since that is robust to files with a different channel ordering or a
     single moment. The repeated sweeps of each channel are the stacks and
     are averaged here into one dB/dt curve + standard error per moment,
-    stored in the same gate-column layout as :class:`KenbecTEMData` so the
+    stored in the same gate-column layout as :class:`TEMSurveyData` so the
     shared ``dbdt``/``snr``/:class:`~pytem.survey.Survey` machinery applies
     unchanged.
 

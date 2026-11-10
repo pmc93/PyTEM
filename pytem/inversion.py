@@ -1819,7 +1819,7 @@ def invert_sci(stations, thicknesses, t_step, tx_size, geometry, x, y, elevation
                vertical_factor=3.0, lateral_factor=1.5, reference_distance=100.0, distance_power=0.5,
                elevation_constraints=True, adaptive=False, maxit=30, stop_at_half_fit=True,
                n_quad=5, use_numba=True, use_cuda=False, transform='dlf', system_filter=None,
-               kernel='exact', tx_height=0.0, rx_height=0.0, verbose=True):
+               kernel='exact', tx_height=0.0, rx_height=0.0, verbose=True, vertical_break=None):
     """
     Spatially constrained inversion (fast SCI, after Lupus): all soundings in
     one system, with constraints between adjacent layers and between map
@@ -1848,6 +1848,9 @@ def invert_sci(stations, thicknesses, t_step, tx_size, geometry, x, y, elevation
     maxit : iteration limit of one run.
     stop_at_half_fit : stop a run once the median RMS reaches 1, before the
         soundings that already fit are over-fitted (not used when adaptive).
+    vertical_break : None, or (n_soundings,) layer indices k (-1 for none):
+        no vertical constraint between layers k and k + 1 of that sounding,
+        e.g. at the lake bed. The lateral constraints stay.
     Other arguments: as :func:`invert_joint`.
 
     A sounding above RMS 1 that improves by less than 1 % over 3 iterations
@@ -1889,7 +1892,8 @@ def invert_sci(stations, thicknesses, t_step, tx_size, geometry, x, y, elevation
     # between neighbours. ``unit`` is sigma without ln(factor); a and b are the soundings involved.
     tops = np.concatenate([[0.0], np.cumsum(thicknesses)])
     own_bottom, other_bottom = np.append(tops[1:], tops[-1] + thicknesses[-1]), np.append(tops[1:], np.inf)
-    rows = [([s * L + j, s * L + j + 1], [-1.0, 1.0], 1.0, False, s, s) for s in range(S) for j in range(L - 1)]
+    broken = np.full(S, -1) if vertical_break is None else np.asarray(vertical_break, dtype=int)
+    rows = [([s * L + j, s * L + j + 1], [-1.0, 1.0], 1.0, False, s, s) for s in range(S) for j in range(L - 1) if j != broken[s]]
     for a, b in _neighbour_edges(x, y):
         unit = (max(1.0, np.hypot(x[a] - x[b], y[a] - y[b])) / reference_distance) ** distance_power
         if not elevation_constraints:

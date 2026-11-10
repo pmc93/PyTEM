@@ -73,9 +73,8 @@ Utilities and add-ons (composable, mostly standalone)
                            verify the production Euler path.      (standalone)
     plotter.py             Matplotlib helpers: plot_sounding, plot_model,
                            plot_inversion.                        (standalone)
-    data_io.py             Field-data import: read_tem_xyz / read_kenbec_xyz /
-                           read_xyz parse TEM Data Manager and TEMImage-Beta
-                           `.xyz` exports into TEMData / KenbecTEMData, with
+    data_io.py             Field-data import: read_tem_xyz / read_xyz parse
+                           TEM Data Manager `.xyz` exports into TEMData, with
                            shared dbdt/snr/to_pytem and line/UTM/distance
                            helpers.                               (standalone)
     survey.py              Survey: quick-look sounding, transect and station-
@@ -123,7 +122,7 @@ Inversion:
         optional: convolve_waveform(), system_filter=H, IP rho(omega)
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .transform_weights import MU0, HANKEL_FILTERS, FOURIER_FILTERS, EULER_PARAMS
 from .backends import HAS_CUDA
@@ -149,7 +148,7 @@ from .inversion import (getJ_ana, getJ_fd, getR, dbdt_to_apprho, getRMS,
 from .plotter import (plot_sounding, plot_model, plot_inversion,
                       plot_survey_models, plot_survey_responses)
 from .benchmarks import benchmark_step_grids
-from .data_io import (TEMData, KenbecTEMData, TunoeTEMData, read_tem_xyz, read_kenbec_xyz,
+from .data_io import (TEMData, TunoeTEMData, read_tem_xyz,
                       read_xyz, read_usf, read_workbench_xyz, read_temcompany_xyz, read_loupe_dat, noise_model,
                       estimate_noise_level)
 from .survey import Survey
@@ -216,10 +215,8 @@ __all__ = [
     'plot_inversion',
     # Field-data import & survey plotting
     'TEMData',
-    'KenbecTEMData',
     'TunoeTEMData',
     'read_tem_xyz',
-    'read_kenbec_xyz',
     'read_xyz',
     'read_usf',
     'read_workbench_xyz',

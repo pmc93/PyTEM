@@ -152,7 +152,7 @@ def plot_survey_models(thicknesses, resistivity_models, rms=None, doi=None,
 
 def plot_survey_responses(station_results, station_ids=None, n_cols=5,
                           figsize_per_panel=(3.2, 3), moment_colors=None):
-    """Plot observed and modelled LM/HM responses for survey stations."""
+    """Plot observed and modelled LM/HM responses with shared time and amplitude axes."""
     if not station_results:
         raise ValueError('station_results must not be empty.')
     if station_ids is None:
@@ -165,7 +165,7 @@ def plot_survey_responses(station_results, station_ids=None, n_cols=5,
         n_rows, n_cols,
         figsize=(figsize_per_panel[0] * n_cols,
                  figsize_per_panel[1] * n_rows),
-        sharex=True, squeeze=False)
+        sharex=True, sharey=True, squeeze=False)
     axes = axes.ravel()
 
     for ax, station in zip(axes, station_ids):
