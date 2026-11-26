@@ -595,21 +595,24 @@ def getAlphas(alpha, thicknesses):
     return alpha * alpha_factor
 
 
-def getR(resistivities, damp=1e-4, weights=None):
-    """First-order roughness (smoothness) matrix with optional damping.
+def getR(resistivities, weights=None):
+    """First-order roughness (smoothness) matrix ``D^T diag(w) D``.
 
     Pass ``weights`` (see :func:`_irls_weights`) to reweight each first
     difference row, turning the default L2 (smooth) penalty into an IRLS
     approximation of an L1 (blocky / minimum-support) penalty.
+
+    The matrix only measures differences between neighbouring layers, so it
+    is singular (it cannot see a uniform shift of every layer); the
+    Gauss-Newton solve (``_gn_solve``) uses a least-squares solve that
+    handles this.
     """
     n_params = resistivities.size
     D = np.zeros((n_params - 1, n_params))
     for k in range(n_params - 1):
         D[k, k] = -1.0
         D[k, k + 1] = 1.0
-    DTD = D.T @ np.diag(weights) @ D if weights is not None else D.T @ D
-    R = DTD + damp * np.eye(n_params)
-    return R
+    return D.T @ np.diag(weights) @ D if weights is not None else D.T @ D
 
 
 def _irls_weights(m, beta=1e-2):
@@ -695,11 +698,17 @@ def getJ_fd(thicknesses, log_resistivities, tx_size, times,
 # Regularised Gauss-Newton inversion helpers
 # ============================================================
 
-def _gn_solve(Jw, dw, R, alpha_vector, m):
+def _gn_solve(Jw, dw, R, alpha_vector, m, l1_beta=None):
     """Solve the weighted, regularised Gauss-Newton normal equations.
 
     Solves  (Jw^T Jw + diag(alpha) R) dm = Jw^T dw - diag(alpha) R m
     via least-squares (robust to mild rank deficiency).
+
+    With ``l1_beta`` (L1), the IRLS weights are iterated to convergence on
+    this linearised problem (fully iterated IRLS, Farquharson & Oldenburg
+    1998): R is rebuilt from the weights of the stepped model ``m + dm`` and
+    the equations are solved again, until ``dm`` changes by less than 1e-4
+    (at most 200 solves). The first solve uses the ``R`` passed in.
 
     Parameters
     ----------
@@ -708,15 +717,26 @@ def _gn_solve(Jw, dw, R, alpha_vector, m):
     R            : (N, N)    roughness matrix from getR()
     alpha_vector : (N,)      per-layer regularisation weights from getAlphas()
     m            : (N,)      current log-resistivity model
+    l1_beta      : float or None  IRLS stabilising floor; None (L2) solves once
 
     Returns
     -------
     dm : (N,) model update
     """
-    AR  = np.diag(alpha_vector) @ R
-    lhs = Jw.T @ Jw + AR
-    rhs = Jw.T @ dw - AR @ m
-    dm, _, _, _ = np.linalg.lstsq(lhs, rhs, rcond=1e-10)
+    JtJ, Jtd = Jw.T @ Jw, Jw.T @ dw
+
+    def solve(R):
+        AR = np.diag(alpha_vector) @ R
+        return np.linalg.lstsq(JtJ + AR, Jtd - AR @ m, rcond=1e-10)[0]
+
+    dm = solve(R)
+    if l1_beta is not None:
+        for _ in range(200):
+            dm_new = solve(getR(m, weights=_irls_weights(m + dm, beta=l1_beta)))
+            change = np.max(np.abs(dm_new - dm))
+            dm = dm_new
+            if change < 1e-4:
+                break
     return dm
 
 
@@ -829,7 +849,8 @@ def _step_functions(thicknesses, t_step, tx_size, geometry, rx_x, rx_y, n_quad, 
 def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                   thicknesses, fwd_fn, obs_data, w,
                   ln_rho_min, ln_rho_max, alpha_step=1/9, rms_current=np.inf,
-                  plot=False, verbose=True, step_backtrack=False, fit_target=False):
+                  plot=False, verbose=True, step_backtrack=False, fit_target=False,
+                  l1_beta=None):
     """Log-spaced regularisation-strength ladder search.
 
     Tests ``alpha_steps`` regularisation strengths starting from
@@ -874,6 +895,8 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
                               run one more at the alpha interpolated to RMS 1
                               (see ``_fitted_alpha``), so the smoothest model
                               that fits can be kept
+    l1_beta      : float or None  L1: IRLS floor; every trial iterates the
+                              weights to convergence (see ``_gn_solve``)
 
     Returns
     -------
@@ -890,7 +913,7 @@ def _alpha_search(alpha_start, alpha_steps, Jw, dw, R, m,
 
     def run_trial(alpha):
         avs   = getAlphas(alpha, thicknesses)
-        delta = _gn_solve(Jw, dw, R, avs, m)
+        delta = _gn_solve(Jw, dw, R, avs, m, l1_beta=l1_beta)
         if step_backtrack == True:
             trial, step, mod, rms = _backtrack_rms(
                 m, delta, ln_rho_min, ln_rho_max, fwd_fn, obs_data, w,
@@ -972,8 +995,8 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
            waveform_n_quad=5,
            geometry='circle_central', n_quad=5,
            rx_x=0.0, rx_y=0.0, tx_height=0.0, rx_height=0.0,
-           circle_warmstart=False, regularization='l2', l1_beta=1.0,
-           step_backtrack=False):
+           circle_warmstart=False, regularization='l2', l1_beta=0.005,
+           step_backtrack=False, l1_beta_cooling=True, l1_beta_min=1e-4, l1_beta_step=None):
     """Regularised Gauss-Newton inversion for 1-D layered-earth TEM.
 
     Minimises  phi(m) = ||W (ln d_obs - ln d_pred(m))||^2 + alpha * m^T R m
@@ -1040,13 +1063,33 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
     rx_height           : float  Rx elevation above ground [m] (default 0.0)
     regularization      : 'l2' (default, smooth Occam-style) or 'l1' (IRLS
                           approximation of a blocky/sharp-boundary penalty,
-                          see :func:`_irls_weights`)
+                          see :func:`_irls_weights`). L1 iterates the IRLS
+                          weights to convergence for every alpha trial
+                          (see :func:`_gn_solve`)
     l1_beta             : float  starting IRLS stabilising floor for
-                          regularization='l1' (default 1.0, deliberately
-                          large/stable); cooled down each iteration alongside
-                          alpha (floored at 1e-4) so the model progressively
+                          regularization='l1' (default 0.005, small enough
+                          that L1 is not close to L2); by default it is cooled down each
+                          accepted update alongside alpha (never below
+                          ``l1_beta_min``) so the model progressively
                           sharpens instead of fighting a fixed stabilisation
-                          level for the whole inversion
+                          level for the whole inversion (see
+                          ``l1_beta_cooling``)
+    l1_beta_cooling     : bool   cool ``l1_beta`` after every accepted update
+                          (default True). False keeps ``l1_beta`` fixed for
+                          the whole inversion, as InverTEM does with its
+                          fixed epsilon = 0.05
+    l1_beta_min         : float  floor of the cooling (default 1e-4). Cooling
+                          never takes ``l1_beta`` below this value, but it
+                          does raise it to this value after the first update
+                          if ``l1_beta`` was started below it, so choose it
+                          at or below the starting ``l1_beta``. Only used
+                          with ``l1_beta_cooling=True``
+    l1_beta_step        : float or None  log10 reduction of ``l1_beta`` per
+                          accepted update when cooling (default None = use
+                          ``alpha_step``, i.e. a factor of 10**(-1/9) = 0.77
+                          per update). A larger value cools faster, e.g. 1/3
+                          divides ``l1_beta`` by about 2.15 per update and
+                          1.0 divides it by 10
     step_backtrack      : bool   opt-in RMS-based step-length backtracking
                           (default False, preserves original behaviour): the
                           plain bounds-only backtrack (`_backtrack`) can still
@@ -1118,7 +1161,8 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
             rx_x=rx_x, rx_y=rx_y, tx_height=tx_height,
             rx_height=rx_height, circle_warmstart=False,
             regularization=regularization, l1_beta=l1_beta,
-            step_backtrack=step_backtrack,
+            step_backtrack=step_backtrack, l1_beta_cooling=l1_beta_cooling,
+            l1_beta_min=l1_beta_min, l1_beta_step=l1_beta_step,
         )
         print(f'[circle_warmstart] Circle converged (RMS={ws["rms_history"][-1]:.3f}). '
               f'Running up to {maxit} square refinement steps...')
@@ -1141,7 +1185,8 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
             rx_x=rx_x, rx_y=rx_y, tx_height=tx_height,
             rx_height=rx_height, circle_warmstart=False,
             regularization=regularization, l1_beta=l1_beta,
-            step_backtrack=step_backtrack,
+            step_backtrack=step_backtrack, l1_beta_cooling=l1_beta_cooling,
+            l1_beta_min=l1_beta_min, l1_beta_step=l1_beta_step,
         )
 
     ln_rho_min = np.log(float(rho_min))
@@ -1357,6 +1402,7 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
             rms_current=rms,
             plot=plot_alpha,
             step_backtrack=step_backtrack,
+            l1_beta=l1_beta_it if regularization == 'l1' else None,
         )
 
         # Select the strongest regularisation that still reaches RMS <= 1;
@@ -1378,8 +1424,9 @@ def invert(obs_data, thicknesses, log_resistivities, tx_size, times,
         # weaker regularisation; shifting up by one step ensures the optimum
         # remains within the search window even if it drifts upward.
         alpha_start = alpha_h[best_idx] * (10.0 ** alpha_step)
-        if regularization == 'l1':
-            l1_beta_it = max(l1_beta_it * (10.0 ** -alpha_step), 1e-4)
+        if regularization == 'l1' and l1_beta_cooling:
+            l1_beta_it = max(
+                l1_beta_it * 10.0 ** -(alpha_step if l1_beta_step is None else l1_beta_step), l1_beta_min)
 
         m = np.clip(m + delta_h[best_idx], ln_rho_min, ln_rho_max)
         d_pred = mod_h[best_idx]
@@ -1645,7 +1692,8 @@ def invert_joint(fit_systems, thicknesses, rho_start, t_step=None, tx_size=None,
             alpha, alpha_steps, weighted_jac, weights * resid, roughness, model,
             thicknesses, predict, observed, weights, lower, upper,
             alpha_step=alpha_step, rms_current=rms, plot=False, verbose=verbose,
-            step_backtrack=step_backtrack, fit_target=adaptive_alpha)
+            step_backtrack=step_backtrack, fit_target=adaptive_alpha,
+            l1_beta=0.05 if norm == 'l1' else None)
         # Select the strongest regularisation that still reaches the target RMS;
         # if none did, fall back to the lowest-RMS trial on the ladder.
         rms_arr = np.asarray(rms_h)

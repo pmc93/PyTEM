@@ -178,7 +178,7 @@ $$\phi(\mathbf{m}) = \|\mathbf{W}(\ln \mathbf{d}_\text{obs} - \ln \mathbf{d}_\te
 |---|---|
 | `getJ_ana` | Analytical Jacobian via adjoint upward recursion |
 | `getJ_fd` | Finite-difference Jacobian (N+1 forward calls) |
-| `getR` | First-order roughness matrix with damping |
+| `getR` | First-order roughness matrix |
 | `getRMS` | Noise-normalised RMS misfit |
 | `getAlpha` | Single log-spaced regularisation parameter |
 | `getAlphas` | Depth-weighted regularisation vector |
